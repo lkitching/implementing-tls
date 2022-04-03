@@ -97,6 +97,24 @@ fn rotate_left(key: &mut [u8]) {
     key[6] = (key[6] << 1) | carry_right;
 }
 
+// rotate the key right - the key is split into two 28-bit halves and each is
+// rotated independently. This means byte 3 has to be handled specially.
+fn rotate_right(key: &mut[u8]) {
+    let carry_right = ( key[ 6 ] & 0x01 ) << 3;
+
+    key[6] = ( key[6] >> 1 ) | ( ( key[5] & 0x01 ) << 7 );
+    key[5] = ( key[5] >> 1 ) | ( ( key[4] & 0x01 ) << 7 );
+    key[4] = ( key[4] >> 1 ) | ( ( key[3] & 0x01 ) << 7 );
+
+    let carry_left = ( key[3] & 0x10 ) << 3;
+    key[3] = ( ( ( key[3] >> 1 ) |
+        ( ( key[2] & 0x01 ) << 7 ) ) & !0x08 ) | carry_right;
+
+    key[2] = ( key[2] >> 1 ) | ( ( key[1] & 0x01 ) << 7 );
+    key[1] = ( key[1] >> 1 ) | ( ( key[0] & 0x01 ) << 7 );
+    key[0] = ( key[0] >> 1 ) | carry_left;
+}
+
 // expansion table
 // half of the input block is expanded from 32 to 48 bits so it can be xor'd with the current
 // key
@@ -169,7 +187,12 @@ const PC1_KEY_SIZE: usize = 7;
 const EXPANSION_BLOCK_SIZE: usize = 6;
 const SUBKEY_SIZE: usize = 8;
 
-fn des_block_operate(plaintext: &mut[u8], ciphertext: &mut[u8], key: &[u8]) {
+pub enum KeySchedule {
+    Encryption,
+    Decryption
+}
+
+fn des_block_operate(plaintext: &mut[u8], ciphertext: &mut[u8], key: &[u8], schedule: KeySchedule) {
     let mut ip_block: [u8; DES_BLOCK_SIZE] = [0; DES_BLOCK_SIZE];
     let mut expansion_block: [u8; EXPANSION_BLOCK_SIZE] = [0; EXPANSION_BLOCK_SIZE];
     let mut pc1_key: [u8; PC1_KEY_SIZE] = [0; PC1_KEY_SIZE];
@@ -181,6 +204,7 @@ fn des_block_operate(plaintext: &mut[u8], ciphertext: &mut[u8], key: &[u8]) {
     // initial input permutation
     permute(&mut ip_block, plaintext, IP_TABLE.as_slice(), DES_BLOCK_SIZE);
 
+    // TODO: extract key schedule into separate trait
     // initial key permutation
     permute(&mut pc1_key, key, PC1_TABLE.as_slice(), PC1_KEY_SIZE);
 
@@ -188,16 +212,27 @@ fn des_block_operate(plaintext: &mut[u8], ciphertext: &mut[u8], key: &[u8]) {
         // expand the right half (bytes 5..8) of the input block to 48 bits
         permute(&mut expansion_block, &ip_block[4..], EXPANSION_TABLE.as_slice(), 6);
 
-        // "key mixing"
-        // rotate both halves of the input key
-        // key is rotated once in rounds 1, 2, 9 and 16 and twice in the other rounds
-        rotate_left(&mut pc1_key);
-        if !(round <= 1 || round == 8 || round == 15) {
+        if let KeySchedule::Encryption = schedule {
+            // "key mixing"
+            // rotate both halves of the input key
+            // key is rotated once in rounds 1, 2, 9 and 16 and twice in the other rounds
             rotate_left(&mut pc1_key);
+            if !(round <= 1 || round == 8 || round == 15) {
+                rotate_left(&mut pc1_key);
+            }
         }
 
         // permute key again according to second permutation table
         permute(&mut subkey, &pc1_key, &PC2_TABLE, SUBKEY_SIZE);
+
+        if let KeySchedule::Decryption = schedule {
+            // key is rotated once in rounds 1, 2, 9 and 16 and twice in other rounds
+            // NOTE: decryption key schedule is in reverse order so 'round 1' is round 16, 'round 2' round 15 etc.
+            rotate_right(&mut pc1_key);
+            if !(round >= 14 || round == 7 || round == 0) {
+                rotate_right(&mut pc1_key);
+            }
+        }
 
         // subkey now contains scheduled key for this round
 
