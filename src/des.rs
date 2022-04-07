@@ -187,6 +187,7 @@ const PC1_KEY_SIZE: usize = 7;
 const EXPANSION_BLOCK_SIZE: usize = 6;
 const SUBKEY_SIZE: usize = 8;
 
+#[derive(Clone, Copy)]
 pub enum KeySchedule {
     Encryption,
     Decryption
@@ -307,4 +308,74 @@ fn des_block_operate(plaintext: &mut[u8], ciphertext: &mut[u8], key: &[u8], sche
     // final permutation
     // this undoes the initial permutation
     permute(ciphertext, &ip_block, &FP_TABLE, DES_BLOCK_SIZE);
+}
+
+struct Pkcs5PaddingIterator<'a> {
+    index: usize,
+    done: bool,
+    bytes: &'a[u8]
+}
+
+impl <'a> Pkcs5PaddingIterator<'a> {
+    fn new(bytes: &'a[u8]) -> Self {
+        Pkcs5PaddingIterator {
+            bytes: bytes,
+            done: false,
+            index: 0
+        }
+    }
+}
+
+impl <'a> Iterator for Pkcs5PaddingIterator<'a> {
+    type Item = Vec<u8>;
+
+    fn next(&mut self) -> Option<Self::Item> {
+        if self.done {
+            None
+        } else {
+            if self.index == self.bytes.len() {
+                // input length is multiple of block length so output padding block
+                self.done = true;
+                let mut pad_block = vec![0; DES_BLOCK_SIZE];
+                pad_block[0] = 0x80;
+                Some(pad_block)
+            } else {
+                let end_index = self.index + DES_BLOCK_SIZE;
+                if end_index >= self.bytes.len() {
+                    // partial block
+                    let mut result = vec![0; DES_BLOCK_SIZE];
+                    let mut i = 0;
+                    for input_index in self.index .. end_index {
+                        result[i] = self.bytes[input_index];
+                        i += 1;
+                    }
+
+                    // NOTE: must be at least one byte remaining in block for first padding byte
+                    result[i] = 0x80;
+
+                    // NOTE: not required but done for consistency
+                    self.index = end_index;
+                    self.done = true;
+                    Some(result)
+                } else {
+                    // full block
+                    let result: Vec<u8> = self.bytes[self.index .. end_index].iter().map(|b| *b).collect();
+                    self.index = end_index;
+                    Some(result)
+                }
+            }
+        }
+    }
+}
+
+fn des_operate(input: &[u8], key: &[u8], schedule: KeySchedule) -> Vec<u8> {
+    let mut output = Vec::with_capacity(DES_BLOCK_SIZE);
+    let mut temp_output = [0; DES_BLOCK_SIZE];
+
+    for mut block in Pkcs5PaddingIterator::new(input) {
+        des_block_operate(&mut block, &mut temp_output, key, schedule);
+        output.extend_from_slice(&temp_output);
+    }
+
+    output
 }
