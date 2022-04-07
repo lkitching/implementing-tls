@@ -368,14 +368,33 @@ impl <'a> Iterator for Pkcs5PaddingIterator<'a> {
     }
 }
 
-fn des_operate(input: &[u8], key: &[u8], schedule: KeySchedule) -> Vec<u8> {
+fn des_operate(input: &[u8], iv: &[u8], key: &[u8], schedule: KeySchedule) -> Vec<u8> {
+    assert_eq!(iv.len(), DES_BLOCK_SIZE, "IV must match DES block size");
+
+    // entire ciphertext output
     let mut output = Vec::with_capacity(DES_BLOCK_SIZE);
-    let mut temp_output = [0; DES_BLOCK_SIZE];
+
+    // previous ciphertext block (initially set to IV)
+    let mut last_block: Vec<u8> = iv.iter().map(|b| *b).collect();
+
+    // current ciphertext block
+    let mut ciphertext_block = [0; DES_BLOCK_SIZE];
 
     for mut block in Pkcs5PaddingIterator::new(input) {
-        des_block_operate(&mut block, &mut temp_output, key, schedule);
-        output.extend_from_slice(&temp_output);
+        // CBC: xor current block with last output
+        xor(&mut block, &last_block, last_block.len());
+        des_block_operate(&mut block, &mut ciphertext_block, key, schedule);
+
+        // write ciphertext block to output
+        output.extend_from_slice(&ciphertext_block);
+
+        // CBC: copy current output into previous block output
+        block.clone_from_slice(&ciphertext_block);
     }
 
     output
+}
+
+fn des_encrypt(input: &[u8], iv: &[u8], key: &[u8]) -> Vec<u8> {
+    des_operate(input, iv, key, KeySchedule::Encryption)
 }
