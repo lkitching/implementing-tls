@@ -368,33 +368,66 @@ impl <'a> Iterator for Pkcs5PaddingIterator<'a> {
     }
 }
 
-fn des_operate(input: &[u8], iv: &[u8], key: &[u8], schedule: KeySchedule) -> Vec<u8> {
+fn des_operate<B: Iterator<Item=Vec<u8>>>(input: &[u8], iv: &[u8], key: &[u8], block_iter: B, schedule: KeySchedule) -> Vec<u8> {
     assert_eq!(iv.len(), DES_BLOCK_SIZE, "IV must match DES block size");
 
     // entire ciphertext output
     let mut output = Vec::with_capacity(DES_BLOCK_SIZE);
 
     // previous ciphertext block (initially set to IV)
-    let mut last_block: Vec<u8> = iv.iter().map(|b| *b).collect();
+    let mut previous_ciphertext_block: Vec<u8> = iv.iter().map(|b| *b).collect();
 
     // current ciphertext block
     let mut ciphertext_block = [0; DES_BLOCK_SIZE];
 
-    for mut block in Pkcs5PaddingIterator::new(input) {
+    for mut block in block_iter {
         // CBC: xor current block with last output
-        xor(&mut block, &last_block, last_block.len());
+        xor(&mut block, &previous_ciphertext_block, previous_ciphertext_block.len());
         des_block_operate(&mut block, &mut ciphertext_block, key, schedule);
 
         // write ciphertext block to output
         output.extend_from_slice(&ciphertext_block);
 
         // CBC: copy current output into previous block output
-        block.clone_from_slice(&ciphertext_block);
+        previous_ciphertext_block.clone_from_slice(&ciphertext_block);
     }
 
     output
 }
 
 fn des_encrypt(input: &[u8], iv: &[u8], key: &[u8]) -> Vec<u8> {
-    des_operate(input, iv, key, KeySchedule::Encryption)
+    des_operate(input, iv, key, Pkcs5PaddingIterator::new(input), KeySchedule::Encryption)
+}
+
+fn des_decrypt(ciphertext: &[u8], iv: &[u8], key: &[u8]) -> Vec<u8> {
+    //NOTE: ciphertext should be multiple of block size
+    assert_eq!(ciphertext.len() % DES_BLOCK_SIZE, 0, "Ciphertext length should be multiple of block size");
+    assert_eq!(iv.len(), DES_BLOCK_SIZE, "IV must match DES block size");
+
+    // previous ciphertext block (initially set to IV)
+    let mut previous_ciphertext_block: Vec<u8> = iv.iter().map(|b| *b).collect();
+
+    // current plaintext block
+    let mut output_buf = vec![0; DES_BLOCK_SIZE];
+
+    // current ciphertext block
+
+    let mut plaintext = Vec::with_capacity(DES_BLOCK_SIZE);
+
+    for ciphertext_block in ciphertext.chunks(DES_BLOCK_SIZE) {
+        // decrypt current block
+        let mut ciphertext_buf: Vec<u8> = ciphertext_block.into_iter().map(|b| *b).collect();
+        des_block_operate(&mut ciphertext_buf, &mut output_buf, key, KeySchedule::Decryption);
+
+        // CBC: XOR current block with previous ciphertext block to recover plaintext
+        xor(&mut output_buf, &previous_ciphertext_block, DES_BLOCK_SIZE);
+
+        plaintext.extend_from_slice(&output_buf);
+
+        // CBC: copy current ciphertext block into previous ciphertext block
+        previous_ciphertext_block.clone_from_slice(ciphertext_block);
+    }
+
+    // TODO: remove padding from end of plaintext
+    plaintext
 }
