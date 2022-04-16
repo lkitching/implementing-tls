@@ -185,7 +185,7 @@ static P_TABLE: [usize; 32] = [
 const DES_BLOCK_SIZE: usize = 8;
 const PC1_KEY_SIZE: usize = 7;
 const EXPANSION_BLOCK_SIZE: usize = 6;
-const SUBKEY_SIZE: usize = 8;
+const SUBKEY_SIZE: usize = 6;
 
 #[derive(Clone, Copy)]
 pub enum KeySchedule {
@@ -341,7 +341,7 @@ impl <'a> Iterator for Pkcs5PaddingIterator<'a> {
                 Some(pad_block)
             } else {
                 let end_index = self.index + DES_BLOCK_SIZE;
-                if end_index >= self.bytes.len() {
+                if end_index > self.bytes.len() {
                     // partial block
                     let mut result = vec![0; DES_BLOCK_SIZE];
                     let mut i = 0;
@@ -395,11 +395,11 @@ fn des_operate<B: Iterator<Item=Vec<u8>>>(input: &[u8], iv: &[u8], key: &[u8], b
     output
 }
 
-fn des_encrypt(input: &[u8], iv: &[u8], key: &[u8]) -> Vec<u8> {
+pub fn des_encrypt(input: &[u8], iv: &[u8], key: &[u8]) -> Vec<u8> {
     des_operate(input, iv, key, Pkcs5PaddingIterator::new(input), KeySchedule::Encryption)
 }
 
-fn des_decrypt(ciphertext: &[u8], iv: &[u8], key: &[u8]) -> Vec<u8> {
+pub fn des_decrypt(ciphertext: &[u8], iv: &[u8], key: &[u8]) -> Vec<u8> {
     //NOTE: ciphertext should be multiple of block size
     assert_eq!(ciphertext.len() % DES_BLOCK_SIZE, 0, "Ciphertext length should be multiple of block size");
     assert_eq!(iv.len(), DES_BLOCK_SIZE, "IV must match DES block size");

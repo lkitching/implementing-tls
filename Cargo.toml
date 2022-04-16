@@ -13,3 +13,7 @@ clap = { version = "3.1.6", features = ["derive"] }
 [[bin]]
 name="http_client"
 path="src/http_client/main.rs"
+
+[[bin]]
+name="des"
+path="src/des/main.rs"
