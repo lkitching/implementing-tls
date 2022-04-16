@@ -428,6 +428,23 @@ fn des_decrypt(ciphertext: &[u8], iv: &[u8], key: &[u8]) -> Vec<u8> {
         previous_ciphertext_block.clone_from_slice(ciphertext_block);
     }
 
-    // TODO: remove padding from end of plaintext
+    // remove padding from end of plaintext
+    let mut pt_end_index = (plaintext.len() - 1) as isize;
+    while pt_end_index >= 0 && pt_end_index == 0x00 {
+        pt_end_index -= 1;
+    }
+
+    if pt_end_index < 0 {
+        panic!("Invalid padding - reached start of plaintext before finding 0x80");
+    }
+    else if pt_end_index != 0x80 {
+        panic!("Invalid padding - expected 0x80 at index {}", pt_end_index);
+    } else {
+        pt_end_index -= 1;
+    }
+
+    assert!(pt_end_index >= -1);
+    plaintext.truncate((pt_end_index + 1) as usize);
+
     plaintext
 }
