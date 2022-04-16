@@ -399,6 +399,30 @@ pub fn des_encrypt(input: &[u8], iv: &[u8], key: &[u8]) -> Vec<u8> {
     des_operate(input, iv, key, Pkcs5PaddingIterator::new(input), KeySchedule::Encryption)
 }
 
+fn remove_padding(plaintext: &mut Vec<u8>) {
+    // padding should always exist
+    if plaintext.len() == 0 {
+        panic!("Invalid padding - plaintext is empty after decryption");
+    }
+
+    // scan backwards from the end of the plaintext to find start of the padding
+    let mut pi = (plaintext.len() - 1);
+    while pi >= 0 && plaintext[pi] == 0x00 {
+        pi -= 1;
+    }
+
+    if pi < 0 {
+        panic!("Invalid padding - reached start of plaintext before finding 0x80");
+    }
+    else if plaintext[pi] != 0x80 {
+        panic!("Invalid padding - expected 0x80 at index {} but found {:#02x}", pi, plaintext[pi]);
+    }
+
+    // pi current points at the start of the padding
+    // this index is the length of the plaintext with the padding removed
+    plaintext.truncate(pi);
+}
+
 pub fn des_decrypt(ciphertext: &[u8], iv: &[u8], key: &[u8]) -> Vec<u8> {
     //NOTE: ciphertext should be multiple of block size
     assert_eq!(ciphertext.len() % DES_BLOCK_SIZE, 0, "Ciphertext length should be multiple of block size");
@@ -429,22 +453,7 @@ pub fn des_decrypt(ciphertext: &[u8], iv: &[u8], key: &[u8]) -> Vec<u8> {
     }
 
     // remove padding from end of plaintext
-    let mut pt_end_index = (plaintext.len() - 1) as isize;
-    while pt_end_index >= 0 && pt_end_index == 0x00 {
-        pt_end_index -= 1;
-    }
-
-    if pt_end_index < 0 {
-        panic!("Invalid padding - reached start of plaintext before finding 0x80");
-    }
-    else if pt_end_index != 0x80 {
-        panic!("Invalid padding - expected 0x80 at index {}", pt_end_index);
-    } else {
-        pt_end_index -= 1;
-    }
-
-    assert!(pt_end_index >= -1);
-    plaintext.truncate((pt_end_index + 1) as usize);
+    remove_padding(&mut plaintext);
 
     plaintext
 }
