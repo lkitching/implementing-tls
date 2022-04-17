@@ -49,11 +49,21 @@ pub fn main() {
 
     match matches.value_of("mode").unwrap() {
         "encrypt" => {
-            let ciphertext = des::des_encrypt(&input, &iv, &key);
+            let ciphertext = if key.len() == 24 {
+                des::des3_encrypt(&input, &iv, &key)
+            } else {
+                des::des_encrypt(&input, &iv, &key)
+            };
+
             show_hex(&ciphertext);
         },
         "decrypt" => {
-            let plaintext = des::des_decrypt(&input, &iv, &key);
+            let plaintext = if key.len() == 24 {
+                des::des3_decrypt(&input, &iv, &key)
+            } else {
+                des::des_decrypt(&input, &iv, &key)
+            };
+
             show_hex(&plaintext);
         },
         _ => {

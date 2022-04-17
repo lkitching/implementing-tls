@@ -368,7 +368,34 @@ impl <'a> Iterator for Pkcs5PaddingIterator<'a> {
     }
 }
 
-fn des_operate<B: Iterator<Item=Vec<u8>>>(iv: &[u8], key: &[u8], block_iter: B, schedule: KeySchedule) -> Vec<u8> {
+trait BlockOperation {
+    fn block_operate(input: &mut [u8], output: &mut [u8], key: &[u8]);
+}
+
+struct DesEncryptBlockOperation {}
+impl BlockOperation for DesEncryptBlockOperation {
+    fn block_operate(input: &mut [u8], output: &mut [u8], key: &[u8]) {
+        des_block_operate(input, output, &key, KeySchedule::Encryption)
+    }
+}
+
+struct TripleDesEncryptBlockOperation {}
+impl BlockOperation for TripleDesEncryptBlockOperation {
+    fn block_operate(input: &mut [u8], output: &mut [u8], key: &[u8]) {
+        // encrypt with key1
+        des_block_operate(input, output, &key[0 .. DES_BLOCK_SIZE], KeySchedule::Encryption);
+
+        // decrypt with key2
+        input.clone_from_slice(output);
+        des_block_operate(input, output, &key[DES_BLOCK_SIZE .. DES_BLOCK_SIZE * 2], KeySchedule::Decryption);
+
+        // encrypt with key3
+        input.clone_from_slice(output);
+        des_block_operate(input, output, &key[DES_BLOCK_SIZE * 2 .. DES_BLOCK_SIZE * 3], KeySchedule::Encryption);
+    }
+}
+
+fn des_encrypt_process<B: Iterator<Item=Vec<u8>>, O: BlockOperation>(iv: &[u8], key: &[u8], block_iter: B) -> Vec<u8> {
     assert_eq!(iv.len(), DES_BLOCK_SIZE, "IV must match DES block size");
 
     // entire ciphertext output
@@ -383,7 +410,8 @@ fn des_operate<B: Iterator<Item=Vec<u8>>>(iv: &[u8], key: &[u8], block_iter: B, 
     for mut block in block_iter {
         // CBC: xor current block with last output
         xor(&mut block, &previous_ciphertext_block, previous_ciphertext_block.len());
-        des_block_operate(&mut block, &mut ciphertext_block, key, schedule);
+        //des_block_operate(&mut block, &mut ciphertext_block, key, schedule);
+        O::block_operate(&mut block, &mut ciphertext_block, key);
 
         // write ciphertext block to output
         output.extend_from_slice(&ciphertext_block);
@@ -396,7 +424,11 @@ fn des_operate<B: Iterator<Item=Vec<u8>>>(iv: &[u8], key: &[u8], block_iter: B, 
 }
 
 pub fn des_encrypt(input: &[u8], iv: &[u8], key: &[u8]) -> Vec<u8> {
-    des_operate(iv, key, Pkcs5PaddingIterator::new(input), KeySchedule::Encryption)
+    des_encrypt_process::<_, DesEncryptBlockOperation>(iv, key, Pkcs5PaddingIterator::new(input))
+}
+
+pub fn des3_encrypt(input: &[u8], iv: &[u8], key: &[u8]) -> Vec<u8> {
+    des_encrypt_process::<_, TripleDesEncryptBlockOperation>(iv, key, Pkcs5PaddingIterator::new(input))
 }
 
 fn remove_padding(plaintext: &mut Vec<u8>) {
@@ -423,7 +455,30 @@ fn remove_padding(plaintext: &mut Vec<u8>) {
     plaintext.truncate(pi);
 }
 
-pub fn des_decrypt(ciphertext: &[u8], iv: &[u8], key: &[u8]) -> Vec<u8> {
+struct DesDecryptBlockOperation {}
+impl BlockOperation for DesDecryptBlockOperation {
+    fn block_operate(input: &mut [u8], output: &mut [u8], key: &[u8]) {
+        des_block_operate(input, output, key, KeySchedule::Decryption);
+    }
+}
+
+struct TripleDesDecryptBlockOperation {}
+impl BlockOperation for TripleDesDecryptBlockOperation {
+    fn block_operate(input: &mut [u8], output: &mut [u8], key: &[u8]) {
+        // decrypt with key 3
+        des_block_operate(input, output, &key[DES_BLOCK_SIZE * 2 .. ], KeySchedule::Decryption);
+
+        // encrypt with key 2
+        input.clone_from_slice(output);
+        des_block_operate(input, output, &key[DES_BLOCK_SIZE .. DES_BLOCK_SIZE * 2], KeySchedule::Encryption);
+
+        // decrypt with key1
+        input.clone_from_slice(output);
+        des_block_operate(input, output, &key[0 .. DES_BLOCK_SIZE], KeySchedule::Decryption);
+    }
+}
+
+fn des_decrypt_process<O: BlockOperation>(ciphertext: &[u8], iv: &[u8], key: &[u8]) -> Vec<u8> {
     //NOTE: ciphertext should be multiple of block size
     assert_eq!(ciphertext.len() % DES_BLOCK_SIZE, 0, "Ciphertext length should be multiple of block size");
     assert_eq!(iv.len(), DES_BLOCK_SIZE, "IV must match DES block size");
@@ -441,7 +496,8 @@ pub fn des_decrypt(ciphertext: &[u8], iv: &[u8], key: &[u8]) -> Vec<u8> {
     for ciphertext_block in ciphertext.chunks(DES_BLOCK_SIZE) {
         // decrypt current block
         let mut ciphertext_buf: Vec<u8> = ciphertext_block.into_iter().map(|b| *b).collect();
-        des_block_operate(&mut ciphertext_buf, &mut output_buf, key, KeySchedule::Decryption);
+        //des_block_operate(&mut ciphertext_buf, &mut output_buf, key, KeySchedule::Decryption);
+        O::block_operate(&mut ciphertext_buf, &mut output_buf, key);
 
         // CBC: XOR current block with previous ciphertext block to recover plaintext
         xor(&mut output_buf, &previous_ciphertext_block, DES_BLOCK_SIZE);
@@ -456,4 +512,12 @@ pub fn des_decrypt(ciphertext: &[u8], iv: &[u8], key: &[u8]) -> Vec<u8> {
     remove_padding(&mut plaintext);
 
     plaintext
+}
+
+pub fn des_decrypt(ciphertext: &[u8], iv: &[u8], key: &[u8]) -> Vec<u8> {
+    des_decrypt_process::<DesDecryptBlockOperation>(ciphertext, iv, key)
+}
+
+pub fn des3_decrypt(ciphertext: &[u8], iv: &[u8], key: &[u8]) -> Vec<u8> {
+    des_decrypt_process::<TripleDesDecryptBlockOperation>(ciphertext, iv, key)
 }
