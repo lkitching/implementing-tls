@@ -368,7 +368,7 @@ impl <'a> Iterator for Pkcs5PaddingIterator<'a> {
     }
 }
 
-fn des_operate<B: Iterator<Item=Vec<u8>>>(input: &[u8], iv: &[u8], key: &[u8], block_iter: B, schedule: KeySchedule) -> Vec<u8> {
+fn des_operate<B: Iterator<Item=Vec<u8>>>(iv: &[u8], key: &[u8], block_iter: B, schedule: KeySchedule) -> Vec<u8> {
     assert_eq!(iv.len(), DES_BLOCK_SIZE, "IV must match DES block size");
 
     // entire ciphertext output
@@ -396,7 +396,7 @@ fn des_operate<B: Iterator<Item=Vec<u8>>>(input: &[u8], iv: &[u8], key: &[u8], b
 }
 
 pub fn des_encrypt(input: &[u8], iv: &[u8], key: &[u8]) -> Vec<u8> {
-    des_operate(input, iv, key, Pkcs5PaddingIterator::new(input), KeySchedule::Encryption)
+    des_operate(iv, key, Pkcs5PaddingIterator::new(input), KeySchedule::Encryption)
 }
 
 fn remove_padding(plaintext: &mut Vec<u8>) {
