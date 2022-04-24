@@ -1,3 +1,5 @@
+use std::io::{self, Read};
+
 fn get_bit(arr: &[u8], bit: usize) -> bool {
     arr[bit / 8] & (0x80 >> (bit % 8)) > 0
 }
@@ -316,6 +318,46 @@ struct Pkcs5PaddingIterator<'a> {
     bytes: &'a[u8]
 }
 
+struct Pkcs5PaddingReader<R : Read> {
+    reader: R,
+    done: bool,
+    block_size: usize
+}
+
+impl <R: Read> Pkcs5PaddingReader<R> {
+    fn new(r: R, block_size: usize) -> Self {
+        Self { reader: r, done: false, block_size}
+    }
+}
+
+impl <R : Read> Read for Pkcs5PaddingReader<R> {
+    fn read(&mut self, buf: &mut [u8]) -> io::Result<usize> {
+        if buf.len() != self.block_size {
+            return Err(io::Error::new(io::ErrorKind::InvalidInput, "Buffer size must match block size"));
+        }
+
+        if self.done {
+            return Ok(0);
+        }
+
+        let bytes_read = self.reader.read(buf)?;
+        if bytes_read < self.block_size {
+            // reached end of reader
+            // not enough bytes to fill last block so calculate size of padding
+            // NOTE: at least one byte must remain at the end of buf
+            buf[bytes_read] = 0x80;
+            for i in (bytes_read + 1) .. buf.len() {
+                buf[i] = 0;
+            }
+
+            self.done = true;
+            return Ok(self.block_size);
+        } else {
+            return Ok(bytes_read);
+        }
+    }
+}
+
 impl <'a> Pkcs5PaddingIterator<'a> {
     fn new(bytes: &'a[u8]) -> Self {
         Pkcs5PaddingIterator {
@@ -395,7 +437,7 @@ impl BlockOperation for TripleDesEncryptBlockOperation {
     }
 }
 
-fn des_encrypt_process<B: Iterator<Item=Vec<u8>>, O: BlockOperation>(iv: &[u8], key: &[u8], block_iter: B) -> Vec<u8> {
+fn des_encrypt_process<R: Read, O: BlockOperation>(iv: &[u8], key: &[u8], reader: &mut R) -> Vec<u8> {
     assert_eq!(iv.len(), DES_BLOCK_SIZE, "IV must match DES block size");
 
     // entire ciphertext output
@@ -407,28 +449,47 @@ fn des_encrypt_process<B: Iterator<Item=Vec<u8>>, O: BlockOperation>(iv: &[u8], 
     // current ciphertext block
     let mut ciphertext_block = [0; DES_BLOCK_SIZE];
 
-    for mut block in block_iter {
-        // CBC: xor current block with last output
-        xor(&mut block, &previous_ciphertext_block, previous_ciphertext_block.len());
-        //des_block_operate(&mut block, &mut ciphertext_block, key, schedule);
-        O::block_operate(&mut block, &mut ciphertext_block, key);
+    let mut buf: [u8; DES_BLOCK_SIZE] = [0; DES_BLOCK_SIZE];
 
-        // write ciphertext block to output
-        output.extend_from_slice(&ciphertext_block);
+    loop {
+        match reader.read(&mut buf) {
+            Ok(0) => {
+                // reached end of input
+                return output;
+            },
+            Ok(bytes_read) => {
+                assert_eq!(bytes_read, DES_BLOCK_SIZE, "Expected to read entire block");
 
-        // CBC: copy current output into previous block output
-        previous_ciphertext_block.clone_from_slice(&ciphertext_block);
+                // read next block
+                // CBC: xor current block with last output
+                xor(&mut buf, &previous_ciphertext_block, previous_ciphertext_block.len());
+                //des_block_operate(&mut block, &mut ciphertext_block, key, schedule);
+                O::block_operate(&mut buf, &mut ciphertext_block, key);
+
+                // write ciphertext block to output
+                output.extend_from_slice(&ciphertext_block);
+
+                // CBC: copy current output into previous block output
+                previous_ciphertext_block.clone_from_slice(&ciphertext_block);
+            },
+            Err(err) => {
+                // TODO: handle properly
+                panic!("Error reading plaintext: {}", err);
+            }
+        }
     }
-
-    output
 }
 
 pub fn des_encrypt(input: &[u8], iv: &[u8], key: &[u8]) -> Vec<u8> {
-    des_encrypt_process::<_, DesEncryptBlockOperation>(iv, key, Pkcs5PaddingIterator::new(input))
+    let c = io::Cursor::new(input);
+    let mut r = Pkcs5PaddingReader::new(c, DES_BLOCK_SIZE);
+    des_encrypt_process::<_, DesEncryptBlockOperation>(iv, key, &mut r)
 }
 
 pub fn des3_encrypt(input: &[u8], iv: &[u8], key: &[u8]) -> Vec<u8> {
-    des_encrypt_process::<_, TripleDesEncryptBlockOperation>(iv, key, Pkcs5PaddingIterator::new(input))
+    let c = io::Cursor::new(input);
+    let mut r = Pkcs5PaddingReader::new(c, DES_BLOCK_SIZE);
+    des_encrypt_process::<_, TripleDesEncryptBlockOperation>(iv, key, &mut r)
 }
 
 fn remove_padding(plaintext: &mut Vec<u8>) {
