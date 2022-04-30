@@ -1,4 +1,5 @@
 use std::io::{self, Read};
+use std::marker::PhantomData;
 
 fn get_bit(arr: &[u8], bit: usize) -> bool {
     arr[bit / 8] & (0x80 >> (bit % 8)) > 0
@@ -324,6 +325,92 @@ struct Pkcs5PaddingReader<R : Read> {
     block_size: usize
 }
 
+enum UnreaderState {
+    Unstarted,
+    Reading(Vec<u8>),
+    Done
+}
+
+struct Pkcs5PaddingUnreader<R : Read> {
+    reader: R,
+    block_size: usize,
+    state: UnreaderState
+}
+
+impl <R: Read> Pkcs5PaddingUnreader<R> {
+    fn new(r: R, block_size: usize) -> Self {
+        Self { reader: r, block_size, state: UnreaderState::Unstarted }
+    }
+}
+
+impl <R : Read> Read for Pkcs5PaddingUnreader<R> {
+    fn read(&mut self, buf: &mut [u8]) -> io::Result<usize> {
+        if buf.len() != self.block_size {
+            return Err(io::Error::new(io::ErrorKind::InvalidInput, "Buffer size must match block size"));
+        }
+
+        let (next_state, result) = match &mut self.state {
+            UnreaderState::Unstarted => {
+                // read first block from underlying reader
+                // NOTE: this must exist!
+                let mut first_block = vec![0; self.block_size];
+                let first_block_bytes = self.reader.read(&mut first_block)?;
+
+                if first_block_bytes != self.block_size {
+                    self.state = UnreaderState::Done;
+                    return Err(io::Error::new(io::ErrorKind::InvalidData, "Expected at least one block from reader"));
+                }
+
+                // try to read next block
+                let mut second_block = vec![0; self.block_size];
+                let second_block_bytes = self.reader.read(&mut second_block)?;
+                if second_block_bytes == 0 {
+                    // input contains a single block
+                    // remove padding and write remaining plaintext to buf
+                    remove_padding(&mut first_block);
+                    buf[0 .. first_block.len()].clone_from_slice(&first_block);
+
+                    (UnreaderState::Done, Ok(first_block.len()))
+
+                } else if second_block_bytes == self.block_size {
+                    // reader contains multiple blocks
+                    // copy first block to output and save second block for next read
+                    buf.clone_from_slice(&first_block);
+                    (UnreaderState::Reading(second_block), Ok(self.block_size))
+                } else {
+                    return Err(io::Error::new(io::ErrorKind::InvalidData, "Expected input to be multiple of block size"));
+                }
+            },
+            UnreaderState::Reading(next) => {
+                // read following block from reader
+                let mut following_block = vec![0; self.block_size];
+                let following_block_bytes = self.reader.read(&mut following_block)?;
+                if following_block_bytes == 0 {
+                    // 'next' is last block
+                    // remove padding and write remaining bytes to buf
+                    remove_padding(next);
+                    buf[0 .. next.len()].clone_from_slice(&next);
+
+                    (UnreaderState::Done, Ok(next.len()))
+                } else if following_block_bytes == self.block_size {
+                    // at least one more block after next
+                    // copy next block to buf
+                    buf.clone_from_slice(&next);
+                    (UnreaderState::Reading(following_block), Ok(self.block_size))
+                } else {
+                    return Err(io::Error::new(io::ErrorKind::InvalidData, "Expected input to be multiple of block size"));
+                }
+            },
+            UnreaderState::Done => {
+                (UnreaderState::Done, Ok(0))
+            }
+        };
+
+        self.state = next_state;
+        return result;
+    }
+}
+
 impl <R: Read> Pkcs5PaddingReader<R> {
     fn new(r: R, block_size: usize) -> Self {
         Self { reader: r, done: false, block_size}
@@ -411,19 +498,20 @@ impl <'a> Iterator for Pkcs5PaddingIterator<'a> {
 }
 
 trait BlockOperation {
-    fn block_operate(input: &mut [u8], output: &mut [u8], key: &[u8]);
+    // TODO: input should not need to be mutable?
+    fn block_operate(&mut self, input: &mut [u8], output: &mut [u8], key: &[u8]);
 }
 
 struct DesEncryptBlockOperation {}
 impl BlockOperation for DesEncryptBlockOperation {
-    fn block_operate(input: &mut [u8], output: &mut [u8], key: &[u8]) {
+    fn block_operate(&mut self, input: &mut [u8], output: &mut [u8], key: &[u8]) {
         des_block_operate(input, output, &key, KeySchedule::Encryption)
     }
 }
 
 struct TripleDesEncryptBlockOperation {}
 impl BlockOperation for TripleDesEncryptBlockOperation {
-    fn block_operate(input: &mut [u8], output: &mut [u8], key: &[u8]) {
+    fn block_operate(&mut self, input: &mut [u8], output: &mut [u8], key: &[u8]) {
         // encrypt with key1
         des_block_operate(input, output, &key[0 .. DES_BLOCK_SIZE], KeySchedule::Encryption);
 
@@ -437,17 +525,17 @@ impl BlockOperation for TripleDesEncryptBlockOperation {
     }
 }
 
-fn des_encrypt_process<R: Read, O: BlockOperation>(iv: &[u8], key: &[u8], reader: &mut R) -> Vec<u8> {
+fn des_encrypt_process<R: Read, O: BlockOperation>(block_op: &mut O, iv: &[u8], key: &[u8], reader: &mut R) -> Vec<u8> {
     assert_eq!(iv.len(), DES_BLOCK_SIZE, "IV must match DES block size");
 
     // entire ciphertext output
     let mut output = Vec::with_capacity(DES_BLOCK_SIZE);
 
     // previous ciphertext block (initially set to IV)
-    let mut previous_ciphertext_block: Vec<u8> = iv.iter().map(|b| *b).collect();
+    //let mut previous_ciphertext_block: Vec<u8> = iv.iter().map(|b| *b).collect();
 
     // current ciphertext block
-    let mut ciphertext_block = [0; DES_BLOCK_SIZE];
+    //let mut ciphertext_block = [0; DES_BLOCK_SIZE];
 
     let mut buf: [u8; DES_BLOCK_SIZE] = [0; DES_BLOCK_SIZE];
 
@@ -462,15 +550,16 @@ fn des_encrypt_process<R: Read, O: BlockOperation>(iv: &[u8], key: &[u8], reader
 
                 // read next block
                 // CBC: xor current block with last output
-                xor(&mut buf, &previous_ciphertext_block, previous_ciphertext_block.len());
+                //xor(&mut buf, &previous_ciphertext_block, previous_ciphertext_block.len());
                 //des_block_operate(&mut block, &mut ciphertext_block, key, schedule);
-                O::block_operate(&mut buf, &mut ciphertext_block, key);
+                let mut block_output = vec![0; DES_BLOCK_SIZE];
+                block_op.block_operate(&mut buf, &mut block_output, key);
 
                 // write ciphertext block to output
-                output.extend_from_slice(&ciphertext_block);
+                output.extend_from_slice(&block_output);
 
                 // CBC: copy current output into previous block output
-                previous_ciphertext_block.clone_from_slice(&ciphertext_block);
+                //previous_ciphertext_block.clone_from_slice(&ciphertext_block);
             },
             Err(err) => {
                 // TODO: handle properly
@@ -481,15 +570,18 @@ fn des_encrypt_process<R: Read, O: BlockOperation>(iv: &[u8], key: &[u8], reader
 }
 
 pub fn des_encrypt(input: &[u8], iv: &[u8], key: &[u8]) -> Vec<u8> {
-    let c = io::Cursor::new(input);
+    let mut c = io::Cursor::new(input);
     let mut r = Pkcs5PaddingReader::new(c, DES_BLOCK_SIZE);
-    des_encrypt_process::<_, DesEncryptBlockOperation>(iv, key, &mut r)
+    let mut block_op = DesEncryptBlockOperation {}; //= CBCModeEncrypt::new(iv, DesEncryptBlockOperation {});
+    //let mut block_op = NullBlockOperation {};
+    des_encrypt_process(&mut block_op, iv, key, &mut r)
 }
 
 pub fn des3_encrypt(input: &[u8], iv: &[u8], key: &[u8]) -> Vec<u8> {
     let c = io::Cursor::new(input);
     let mut r = Pkcs5PaddingReader::new(c, DES_BLOCK_SIZE);
-    des_encrypt_process::<_, TripleDesEncryptBlockOperation>(iv, key, &mut r)
+    let mut block_op = TripleDesEncryptBlockOperation {}; //CBCModeDecrypt::new(iv, TripleDesEncryptBlockOperation {});
+    des_encrypt_process(&mut block_op, iv, key, &mut r)
 }
 
 fn remove_padding(plaintext: &mut Vec<u8>) {
@@ -518,14 +610,14 @@ fn remove_padding(plaintext: &mut Vec<u8>) {
 
 struct DesDecryptBlockOperation {}
 impl BlockOperation for DesDecryptBlockOperation {
-    fn block_operate(input: &mut [u8], output: &mut [u8], key: &[u8]) {
+    fn block_operate(&mut self, input: &mut [u8], output: &mut [u8], key: &[u8]) {
         des_block_operate(input, output, key, KeySchedule::Decryption);
     }
 }
 
 struct TripleDesDecryptBlockOperation {}
 impl BlockOperation for TripleDesDecryptBlockOperation {
-    fn block_operate(input: &mut [u8], output: &mut [u8], key: &[u8]) {
+    fn block_operate(&mut self, input: &mut [u8], output: &mut [u8], key: &[u8]) {
         // decrypt with key 3
         des_block_operate(input, output, &key[DES_BLOCK_SIZE * 2 .. ], KeySchedule::Decryption);
 
@@ -539,13 +631,135 @@ impl BlockOperation for TripleDesDecryptBlockOperation {
     }
 }
 
-fn des_decrypt_process<O: BlockOperation>(ciphertext: &[u8], iv: &[u8], key: &[u8]) -> Vec<u8> {
+struct DesDecryptor<O: BlockOperation, R: Read> {
+    reader: R,
+    block_size: usize,
+    previous_ciphertext_block: Vec<u8>,
+    key: Vec<u8>,
+    block_op: O
+}
+
+impl <O: BlockOperation, R: Read> DesDecryptor<O, R> {
+    fn new(block_op: O, reader: R, block_size: usize, iv: &[u8], key: &[u8]) -> Self {
+        // TODO: return Result
+        assert_eq!(iv.len(), block_size, "IV length must match DES block size");
+
+        // TODO: check key length - depends on block operation!
+
+        // previous ciphertext block is initially set to IV
+        let previous_ciphertext_block: Vec<u8> = iv.iter().map(|b| *b).collect();
+        let key_vec = key.iter().map(|b| *b).collect();
+        DesDecryptor { block_op, reader, block_size, previous_ciphertext_block, key: key_vec }
+    }
+}
+
+impl <O: BlockOperation, R: Read> Read for DesDecryptor<O, R> {
+    fn read(&mut self, buf: &mut [u8]) -> io::Result<usize> {
+        if buf.len() != self.block_size {
+            return Err(io::Error::new(io::ErrorKind::InvalidInput, "Buffer size must match block size"));
+        }
+
+        // read next ciphertext block
+        let mut ciphertext_block = vec![0; self.block_size];
+        let bytes_read = self.reader.read(&mut ciphertext_block)?;
+
+        if bytes_read == self.block_size {
+            let mut plaintext_buf = vec![0; self.block_size];
+
+            // decrypt current block
+            self.block_op.block_operate(&mut ciphertext_block, &mut plaintext_buf, &self.key);
+
+            // CBC: XOR current block with previous ciphertext block to recover plaintext
+            xor(&mut plaintext_buf, &self.previous_ciphertext_block, DES_BLOCK_SIZE);
+
+            // CBC: copy current ciphertext block into previous ciphertext block
+            self.previous_ciphertext_block = ciphertext_block;
+
+            // write plaintext to buf
+            buf.clone_from_slice(&plaintext_buf);
+
+            Ok(self.block_size)
+        } else if bytes_read == 0 {
+            return Ok(0);
+        } else {
+            return Err(io::Error::new(io::ErrorKind::InvalidData, "Expected input to be multiple of block size"));
+        }
+    }
+}
+
+
+struct CBCModeEncrypt<O: BlockOperation> {
+    previous_ciphertext_block: Vec<u8>,
+    enc_op: O
+}
+
+impl <O: BlockOperation> CBCModeEncrypt<O> {
+    fn new(iv: &[u8], enc_op: O) -> Self {
+        CBCModeEncrypt {
+            enc_op,
+            previous_ciphertext_block: iv.iter().map(|b| *b).collect()
+        }
+    }
+}
+
+impl <O: BlockOperation> BlockOperation for CBCModeEncrypt<O> {
+    fn block_operate(&mut self, input: &mut [u8], output: &mut [u8], key: &[u8]) {
+        // XOR input with previous ciphertext block before encryption
+        xor(output, &self.previous_ciphertext_block, output.len());
+
+        self.enc_op.block_operate(input, output, key);
+
+        // copy encrypted block for next operation
+        self.previous_ciphertext_block.clone_from_slice(output);
+    }
+}
+
+struct CBCModeDecrypt<O: BlockOperation> {
+    previous_ciphertext_block: Vec<u8>,
+    dec_op: O
+}
+
+impl <O: BlockOperation> CBCModeDecrypt<O> {
+    fn new(iv: &[u8], dec_op: O) -> Self {
+        CBCModeDecrypt {
+            dec_op,
+            previous_ciphertext_block: iv.iter().map(|b| *b).collect()
+        }
+    }
+}
+
+impl <O: BlockOperation> BlockOperation for CBCModeDecrypt<O> {
+    fn block_operate(&mut self, input: &mut [u8], output: &mut [u8], key: &[u8]) {
+        // copy input buffer. This needs to be available to use as the next previous ciphertext block
+        let mut input_buf = vec![0; input.len()];
+        input_buf.clone_from_slice(input);
+
+        // decrypt
+        self.dec_op.block_operate(&mut input_buf, output, key);
+
+        // XOR with previous ciphertext
+        xor(output, &self.previous_ciphertext_block, output.len());
+
+        // copy previous ciphertext block
+        self.previous_ciphertext_block.clone_from_slice(input);
+    }
+}
+
+struct NullBlockOperation {}
+
+impl BlockOperation for NullBlockOperation {
+    fn block_operate(&mut self, input: &mut [u8], output: &mut [u8], key: &[u8]) {
+        output.clone_from_slice(input);
+    }
+}
+
+fn des_decrypt_process<O: BlockOperation>(block_op: &mut O, ciphertext: &[u8], iv: &[u8], key: &[u8]) -> Vec<u8> {
     //NOTE: ciphertext should be multiple of block size
     assert_eq!(ciphertext.len() % DES_BLOCK_SIZE, 0, "Ciphertext length should be multiple of block size");
     assert_eq!(iv.len(), DES_BLOCK_SIZE, "IV must match DES block size");
 
-    // previous ciphertext block (initially set to IV)
-    let mut previous_ciphertext_block: Vec<u8> = iv.iter().map(|b| *b).collect();
+    // // previous ciphertext block (initially set to IV)
+    // let mut previous_ciphertext_block: Vec<u8> = iv.iter().map(|b| *b).collect();
 
     // current plaintext block
     let mut output_buf = vec![0; DES_BLOCK_SIZE];
@@ -558,15 +772,15 @@ fn des_decrypt_process<O: BlockOperation>(ciphertext: &[u8], iv: &[u8], key: &[u
         // decrypt current block
         let mut ciphertext_buf: Vec<u8> = ciphertext_block.into_iter().map(|b| *b).collect();
         //des_block_operate(&mut ciphertext_buf, &mut output_buf, key, KeySchedule::Decryption);
-        O::block_operate(&mut ciphertext_buf, &mut output_buf, key);
+        block_op.block_operate(&mut ciphertext_buf, &mut output_buf, key);
 
         // CBC: XOR current block with previous ciphertext block to recover plaintext
-        xor(&mut output_buf, &previous_ciphertext_block, DES_BLOCK_SIZE);
+        //xor(&mut output_buf, &previous_ciphertext_block, DES_BLOCK_SIZE);
 
         plaintext.extend_from_slice(&output_buf);
 
         // CBC: copy current ciphertext block into previous ciphertext block
-        previous_ciphertext_block.clone_from_slice(ciphertext_block);
+        //previous_ciphertext_block.clone_from_slice(ciphertext_block);
     }
 
     // remove padding from end of plaintext
@@ -575,10 +789,40 @@ fn des_decrypt_process<O: BlockOperation>(ciphertext: &[u8], iv: &[u8], key: &[u
     plaintext
 }
 
+fn new_des_decrypt_process<O: BlockOperation>(block_op: O, ciphertext: &[u8], iv: &[u8], key: &[u8]) -> Vec<u8> {
+    let c = io::Cursor::new(ciphertext);
+
+    let decryptor = DesDecryptor::new(block_op, c, DES_BLOCK_SIZE, iv, key);
+
+    let mut unpadder = Pkcs5PaddingUnreader::new(decryptor, DES_BLOCK_SIZE);
+
+    let mut plaintext = Vec::new();
+    let mut block = vec![0; DES_BLOCK_SIZE];
+
+    let mut i = 1;
+    loop {
+        let bytes_read = unpadder.read(&mut block).expect("Failed to read plaintext block");
+        if bytes_read > 0 {
+            plaintext.extend_from_slice(&block[0 .. bytes_read]);
+            i += 1;
+        } else {
+            break;
+        }
+    }
+
+    plaintext
+}
+
 pub fn des_decrypt(ciphertext: &[u8], iv: &[u8], key: &[u8]) -> Vec<u8> {
-    des_decrypt_process::<DesDecryptBlockOperation>(ciphertext, iv, key)
+    //des_decrypt_process::<DesDecryptBlockOperation>(ciphertext, iv, key)
+    let mut block_op = DesDecryptBlockOperation {};
+    //let mut block_op = NullBlockOperation {};
+    ////let mode = CBCModeDecrypt::new(iv, block_op);
+    new_des_decrypt_process(block_op, ciphertext, iv, key)
 }
 
 pub fn des3_decrypt(ciphertext: &[u8], iv: &[u8], key: &[u8]) -> Vec<u8> {
-    des_decrypt_process::<TripleDesDecryptBlockOperation>(ciphertext, iv, key)
+    //des_decrypt_process::<TripleDesDecryptBlockOperation>(ciphertext, iv, key)
+    let mut block_op = TripleDesEncryptBlockOperation {};
+    new_des_decrypt_process(block_op, ciphertext, iv, key)
 }
