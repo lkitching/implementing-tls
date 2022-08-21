@@ -1,4 +1,4 @@
-use std::process;
+use std::{io, process};
 
 use clap::{arg, Command};
 
@@ -9,6 +9,38 @@ fn show_hex(bytes: &[u8]) {
         print!("{:02x}", b);
     }
     println!();
+}
+
+struct HexWriter<W> {
+    inner: W
+}
+
+impl <W> HexWriter<W> {
+    fn new(inner: W) -> Self {
+        HexWriter { inner }
+    }
+}
+
+impl <W: io::Write> io::Write for HexWriter<W> {
+    fn write(&mut self, buf: &[u8]) -> io::Result<usize> {
+        let mut s = String::with_capacity(buf.len());
+        for b in buf.iter() {
+            s.push_str(&format!("{:02x}", b));
+        }
+
+        let mut bytes_written = 0;
+        let to_write = s.as_bytes();
+        while bytes_written < to_write.len() {
+            let w = self.inner.write(&to_write[bytes_written..])?;
+            bytes_written += w;
+        }
+
+        Ok(buf.len())
+    }
+
+    fn flush(&mut self) -> io::Result<()> {
+        self.inner.flush()
+    }
 }
 
 fn parse_hex(hex_str: &str) -> Result<Vec<u8>, String> {
@@ -49,13 +81,20 @@ pub fn main() {
 
     match matches.value_of("mode").unwrap() {
         "encrypt" => {
-            let ciphertext = if key.len() == 24 {
-                des::des3_encrypt(&input, &iv, &key)
+            let mut hw = HexWriter::new(io::stdout());
+
+            let result = if key.len() == 24 {
+                //des::des3_encrypt(&input, &iv, &key)
+                des::des_encrypt_process(des::TripleDesEncryptBlockOperation {}, &input, &iv, &key, &mut hw)
             } else {
-                des::des_encrypt(&input, &iv, &key)
+                //des::des_encrypt(&input, &iv, &key)
+                des::des_encrypt_process(des::DesEncryptBlockOperation {}, &input, &iv, &key, &mut hw)
             };
 
-            show_hex(&ciphertext);
+            if let Err(e) = result {
+                println!("Failed to encrypt: {}", e);
+                process::exit(1);
+            }
         },
         "decrypt" => {
             let plaintext = if key.len() == 24 {

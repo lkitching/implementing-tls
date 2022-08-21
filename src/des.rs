@@ -308,14 +308,14 @@ fn des_block_operate(plaintext: &[u8], ciphertext: &mut[u8], key: &[u8], schedul
     permute(ciphertext, &ip_block, &FP_TABLE, DES_BLOCK_SIZE);
 }
 
-struct DesEncryptBlockOperation {}
+pub struct DesEncryptBlockOperation {}
 impl BlockOperation for DesEncryptBlockOperation {
     fn block_operate(&mut self, input: &[u8], output: &mut [u8], key: &[u8]) {
         des_block_operate(input, output, &key, KeySchedule::Encryption)
     }
 }
 
-struct TripleDesEncryptBlockOperation {}
+pub struct TripleDesEncryptBlockOperation {}
 impl BlockOperation for TripleDesEncryptBlockOperation {
     fn block_operate(&mut self, input: &[u8], output: &mut [u8], key: &[u8]) {
         let mut buf = vec![0; DES_BLOCK_SIZE];
@@ -356,45 +356,48 @@ impl BlockOperation for TripleDesDecryptBlockOperation {
     }
 }
 
-fn des_encrypt_process<O: BlockOperation>(encrypt_op: O, input: &[u8], iv: &[u8], key: &[u8]) -> Vec<u8> {
+pub fn des_encrypt_process<O: BlockOperation, W: io::Write>(encrypt_op: O, input: &[u8], iv: &[u8], key: &[u8], writer: &mut W) -> io::Result<u64> {
+    let mode = block::CBCEncryptMode::new(encrypt_op, iv);
     let c = io::Cursor::new(input);
     let r = padding::Pkcs5PaddingReader::new(c, DES_BLOCK_SIZE);
-    let mode = block::CBCEncryptMode::new(encrypt_op, iv);
+
     let mut encryptor = block::BlockOperationReader::new(mode, r, key, DES_BLOCK_SIZE);
 
-    let mut ciphertext_buf = Vec::new();
-    io::copy(&mut encryptor, &mut ciphertext_buf).expect("Failed to encrypt");
-
-    ciphertext_buf
+    io::copy(&mut encryptor, writer)
 }
 
-fn des_decrypt_process<O: BlockOperation>(block_decrypt_op: O, ciphertext: &[u8], iv: &[u8], key: &[u8]) -> Vec<u8> {
+fn des_decrypt_process<O: BlockOperation, W: io::Write>(block_decrypt_op: O, ciphertext: &[u8], iv: &[u8], key: &[u8], writer: &mut W) -> io::Result<u64> {
     let mode = block::CBCDecryptMode::new(block_decrypt_op, iv);
 
     let ciphertext_reader = io::Cursor::new(ciphertext);
     let decryptor = block::BlockOperationReader::new(mode, ciphertext_reader, key, DES_BLOCK_SIZE);
     let mut plaintext_reader = padding::Pkcs5PaddingUnreader::new(decryptor, DES_BLOCK_SIZE);
 
-    let mut plaintext_buf = Vec::new();
-
-    io::copy(&mut plaintext_reader, &mut plaintext_buf).expect("Failed to copy");
-    plaintext_buf
+    io::copy(&mut plaintext_reader, writer)
 }
 
 pub fn des_encrypt(input: &[u8], iv: &[u8], key: &[u8]) -> Vec<u8> {
-    des_encrypt_process(DesEncryptBlockOperation {}, input, iv, key)
+    let mut ciphertext_buf = Vec::new();
+    des_encrypt_process(DesEncryptBlockOperation {}, input, iv, key, &mut ciphertext_buf).expect("Failed to encrypt with DES");
+    ciphertext_buf
 }
 
 pub fn des3_encrypt(input: &[u8], iv: &[u8], key: &[u8]) -> Vec<u8> {
-    des_encrypt_process(TripleDesEncryptBlockOperation {}, input, iv, key)
+    let mut ciphertext_buf = Vec::new();
+    des_encrypt_process(TripleDesEncryptBlockOperation {}, input, iv, key, &mut ciphertext_buf).expect("Failed to encrypt DES3");
+    ciphertext_buf
 }
 
 pub fn des_decrypt(ciphertext: &[u8], iv: &[u8], key: &[u8]) -> Vec<u8> {
-    des_decrypt_process(DesDecryptBlockOperation {}, ciphertext, iv, key)
+    let mut plaintext_buf = Vec::new();
+    des_decrypt_process(DesDecryptBlockOperation {}, ciphertext, iv, key, &mut plaintext_buf);
+    plaintext_buf
 }
 
 pub fn des3_decrypt(ciphertext: &[u8], iv: &[u8], key: &[u8]) -> Vec<u8> {
-    des_decrypt_process(TripleDesDecryptBlockOperation {}, ciphertext, iv, key)
+    let mut plaintext_buf = Vec::new();
+    des_decrypt_process(TripleDesDecryptBlockOperation {}, ciphertext, iv, key, &mut plaintext_buf);
+    plaintext_buf
 }
 
 #[cfg(test)]
