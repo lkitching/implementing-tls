@@ -18,3 +18,7 @@ path="src/http_client/main.rs"
 [[bin]]
 name="des"
 path="src/des/main.rs"
+
+[[bin]]
+name="aes"
+path="src/aes/main.rs"

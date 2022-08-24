@@ -332,14 +332,14 @@ impl BlockOperation for TripleDesEncryptBlockOperation {
     }
 }
 
-struct DesDecryptBlockOperation {}
+pub struct DesDecryptBlockOperation {}
 impl BlockOperation for DesDecryptBlockOperation {
     fn block_operate(&mut self, input: &[u8], output: &mut [u8], key: &[u8]) {
         des_block_operate(input, output, key, KeySchedule::Decryption);
     }
 }
 
-struct TripleDesDecryptBlockOperation {}
+pub struct TripleDesDecryptBlockOperation {}
 impl BlockOperation for TripleDesDecryptBlockOperation {
     fn block_operate(&mut self, input: &[u8], output: &mut [u8], key: &[u8]) {
         let mut buf = vec![0; DES_BLOCK_SIZE];
@@ -366,7 +366,7 @@ pub fn des_encrypt_process<O: BlockOperation, W: io::Write>(encrypt_op: O, input
     io::copy(&mut encryptor, writer)
 }
 
-fn des_decrypt_process<O: BlockOperation, W: io::Write>(block_decrypt_op: O, ciphertext: &[u8], iv: &[u8], key: &[u8], writer: &mut W) -> io::Result<u64> {
+pub fn des_decrypt_process<O: BlockOperation, W: io::Write>(block_decrypt_op: O, ciphertext: &[u8], iv: &[u8], key: &[u8], writer: &mut W) -> io::Result<u64> {
     let mode = block::CBCDecryptMode::new(block_decrypt_op, iv);
 
     let ciphertext_reader = io::Cursor::new(ciphertext);
