@@ -22,3 +22,7 @@ path="src/des/main.rs"
 [[bin]]
 name="aes"
 path="src/aes/main.rs"
+
+[[bin]]
+name="rc4"
+path="src/rc4/main.rs"

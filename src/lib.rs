@@ -5,3 +5,4 @@ pub mod util;
 pub mod des;
 pub mod aes;
 pub mod hex;
+pub mod rc4;
