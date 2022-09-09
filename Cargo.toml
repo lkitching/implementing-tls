@@ -26,3 +26,7 @@ path="src/aes/main.rs"
 [[bin]]
 name="rc4"
 path="src/rc4/main.rs"
+
+[[bin]]
+name="rsa"
+path="src/rsa/main.rs"
