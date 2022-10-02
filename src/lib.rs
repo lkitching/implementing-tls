@@ -9,3 +9,4 @@ pub mod rc4;
 pub mod huge;
 pub mod rsa;
 pub mod md5;
+pub mod sha;
