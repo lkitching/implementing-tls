@@ -1,5 +1,7 @@
 use std::num::Wrapping;
 
+use crate::hash::{HashAlgorithm};
+
 const SHA1_RESULT_SIZE: usize = 5;
 const SHA1_INPUT_BLOCK_SIZE: usize = 56;
 const SHA1_BLOCK_SIZE: usize = 64;
@@ -138,10 +140,50 @@ pub fn sha1_hash_bytes(hash: [u32; SHA1_RESULT_SIZE]) -> [u8; 20] {
     bytes
 }
 
+pub struct SHA1HashAlgorithm {}
+
+impl HashAlgorithm for SHA1HashAlgorithm {
+    type State = [u32; SHA1_RESULT_SIZE];
+
+    fn initialise(&self) -> Self::State {
+        SHA1_INITIAL_HASH.clone()
+    }
+
+    fn block_size(&self) -> usize {
+        SHA1_BLOCK_SIZE
+    }
+
+    fn input_block_size(&self) -> usize {
+        SHA1_INPUT_BLOCK_SIZE
+    }
+
+    fn block_operate(&self, block: &[u8], state: &mut Self::State) {
+        sha1_block_operate(block, state);
+    }
+
+    fn finalise(&self, final_block: &mut [u8], input_len_bytes: usize, mut state: Self::State) -> Vec<u8> {
+        let length_in_bits = input_len_bytes * 8;
+
+        // set length at end of final block
+        final_block[SHA1_BLOCK_SIZE - 4] = ((length_in_bits & 0xFF000000) >> 24) as u8;
+        final_block[SHA1_BLOCK_SIZE - 3] = ((length_in_bits & 0x00FF0000) >> 16) as u8;;
+        final_block[SHA1_BLOCK_SIZE - 2] = ((length_in_bits & 0x0000FF00) >> 8) as u8;
+        final_block[SHA1_BLOCK_SIZE - 1] = (length_in_bits & 0x000000FF) as u8;
+
+        sha1_block_operate(&final_block, &mut state);
+
+        let result = sha1_hash_bytes(state);
+        result.to_vec()
+    }
+}
+
 #[cfg(test)]
 mod test {
     use super::*;
+    use crate::hash::{hash};
     use crate::hex;
+
+    use std::io;
 
     #[test]
     fn empty_test() {
@@ -156,6 +198,29 @@ mod test {
     fn book_test() {
         let hash = sha1_hash("abc".as_bytes());
         let hash_bytes = sha1_hash_bytes(hash);
+        let expected = hex::read_bytes("0xa9993e364706816aba3e25717850c26c9cd0d89d").expect("Failed to parse hex");
+
+        assert_eq!(&expected, &hash_bytes);
+    }
+
+    #[test]
+    fn trait_empty_test() {
+        let alg = SHA1HashAlgorithm {};
+        let mut source = io::Cursor::new(&[]);
+        let hash_bytes = hash(&mut source, &alg).expect("Failed to generate hash");
+
+        let expected = hex::read_bytes("0xda39a3ee5e6b4b0d3255bfef95601890afd80709").expect("Failed to parse hex");
+
+        assert_eq!(&expected, &hash_bytes);
+    }
+
+    #[test]
+    fn trait_book_test() {
+        let alg = SHA1HashAlgorithm {};
+        let input_bytes = "abc".as_bytes();
+        let mut source = io::Cursor::new(input_bytes);
+
+        let hash_bytes = hash(&mut source, &alg).expect("Failed to generate hash");
         let expected = hex::read_bytes("0xa9993e364706816aba3e25717850c26c9cd0d89d").expect("Failed to parse hex");
 
         assert_eq!(&expected, &hash_bytes);

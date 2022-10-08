@@ -1,6 +1,7 @@
-use std::{env, process};
+use std::{env, process, io};
 
 use implementing_tls::{md5, hex, sha};
+use implementing_tls::hash::{HashAlgorithm, hash};
 
 fn main() {
     let args: Vec<String> = env::args().collect();
@@ -11,15 +12,14 @@ fn main() {
     }
 
     let bytes = args[2].as_bytes();
+    let mut c = io::Cursor::new(bytes.to_vec());
 
     let hash_bytes = match args[1].as_str() {
         "-md5" => {
-            let md5_result = md5::md5_hash(bytes);
-            md5::md5_hash_bytes(md5_result).to_vec()
+            hash(&mut c, &md5::MD5HashAlgorithm {}).expect("Failed to calculate MD5 hash")
         },
         "-sha1" => {
-            let sha1_result = sha::sha1_hash(bytes);
-            sha::sha1_hash_bytes(sha1_result).to_vec()
+            hash(&mut c, &sha::SHA1HashAlgorithm{}).expect("Failed to calculate SHA1 hash")
         }
         _ => {
             eprintln!("Invalid hash function {}", args[1]);

@@ -1,5 +1,6 @@
 use std::convert::{TryInto};
 use std::num::Wrapping;
+use crate::hash::HashAlgorithm;
 
 #[allow(non_snake_case)]
 fn F(x: u32, y: u32, z: u32) -> u32 {
@@ -260,10 +261,52 @@ pub fn md5_hash_bytes(result: [u32; MD5_RESULT_SIZE]) -> [u8; 16] {
     output
 }
 
+pub struct MD5HashAlgorithm {}
+
+impl HashAlgorithm for MD5HashAlgorithm {
+    type State = [u32; MD5_RESULT_SIZE];
+
+    fn initialise(&self) -> Self::State {
+        MD5_INITIAL_HASH
+    }
+
+    fn block_size(&self) -> usize {
+        MD5_BLOCK_SIZE
+    }
+
+    fn input_block_size(&self) -> usize {
+        MD5_INPUT_BLOCK_SIZE
+    }
+
+    fn block_operate(&self, block: &[u8], state: &mut Self::State) {
+        md5_block_operate(block, state);
+    }
+
+    fn finalise(&self, final_block: &mut [u8], input_len_bytes: usize, mut state: Self::State) -> Vec<u8> {
+        let length_in_bits = input_len_bytes * 8;
+
+        // add length to end of last block
+        // NOTE: md5 allows for 64 bits of length but this implementation can only handle 32 bit
+        // leave the upper 4 bytes as 0
+        final_block[MD5_BLOCK_SIZE - 5] = ((length_in_bits & 0xFF000000) >> 24) as u8;
+        final_block[MD5_BLOCK_SIZE - 6] = ((length_in_bits & 0x00FF0000) >> 16) as u8;
+        final_block[MD5_BLOCK_SIZE - 7] = ((length_in_bits & 0x0000FF00) >> 8) as u8;
+        final_block[MD5_BLOCK_SIZE - 8] = (length_in_bits & 0x000000FF) as u8;
+
+        md5_block_operate(final_block, &mut state);
+
+        let hash_bytes = md5_hash_bytes(state);
+        hash_bytes.to_vec()
+    }
+}
+
 #[cfg(test)]
 mod test {
     use super::*;
     use crate::hex;
+    use crate::hash::{hash};
+
+    use std::io;
 
     #[test]
     fn empty_test() {
@@ -275,11 +318,33 @@ mod test {
     }
 
     #[test]
+    fn trait_empty_test() {
+        let alg = MD5HashAlgorithm {};
+        let mut source = io::Cursor::new(&[]);
+
+        let hash_bytes = hash(&mut source, &alg).expect("Failed to generate hash");
+        let expected = hex::read_bytes("0xd41d8cd98f00b204e9800998ecf8427e").expect("Failed to parse hex");
+
+        assert_eq!(&expected, &hash_bytes);
+    }
+
+    #[test]
     fn book_test() {
         let result = md5_hash("abc".as_bytes());
         let bytes = md5_hash_bytes(result);
 
         let expected = hex::read_bytes("0x900150983cd24fb0d6963f7d28e17f72").expect("Failed to parse hex");
         assert_eq!(&expected, bytes.as_slice());
+    }
+
+    #[test]
+    fn trait_book_test() {
+        let alg = MD5HashAlgorithm {};
+        let mut source = io::Cursor::new("abc".as_bytes());
+
+        let hash_bytes = hash(&mut source, &alg).expect("Failed to generate hash");
+        let expected = hex::read_bytes("0x900150983cd24fb0d6963f7d28e17f72").expect("Failed to parse hex");
+
+        assert_eq!(&expected, &hash_bytes);
     }
 }
