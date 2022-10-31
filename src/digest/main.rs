@@ -20,6 +20,9 @@ fn main() {
         },
         "-sha1" => {
             hash(&mut c, &sha::SHA1HashAlgorithm{}).expect("Failed to calculate SHA1 hash")
+        },
+        "-sha256" => {
+            hash(&mut c, &sha::SHA256HashAlgorithm {}).expect("Failed to calculate SHA256 hash")
         }
         _ => {
             eprintln!("Invalid hash function {}", args[1]);

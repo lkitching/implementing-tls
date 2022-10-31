@@ -128,6 +128,7 @@ pub fn sha1_hash(input: &[u8]) -> [u32; SHA1_RESULT_SIZE] {
     hash
 }
 
+// TODO: remove and use sha_hash_bytes
 pub fn sha1_hash_bytes(hash: [u32; SHA1_RESULT_SIZE]) -> [u8; 20] {
     let mut bytes: [u8; 20] = [0; 20];
 
@@ -138,6 +139,16 @@ pub fn sha1_hash_bytes(hash: [u32; SHA1_RESULT_SIZE]) -> [u8; 20] {
     }
 
     bytes
+}
+
+fn write_final_block_length(final_block: &mut [u8], input_len_bytes: usize) {
+    let length_in_bits = input_len_bytes * 8;
+
+    // set length at end of final block
+    final_block[SHA1_BLOCK_SIZE - 4] = ((length_in_bits & 0xFF000000) >> 24) as u8;
+    final_block[SHA1_BLOCK_SIZE - 3] = ((length_in_bits & 0x00FF0000) >> 16) as u8;;
+    final_block[SHA1_BLOCK_SIZE - 2] = ((length_in_bits & 0x0000FF00) >> 8) as u8;
+    final_block[SHA1_BLOCK_SIZE - 1] = (length_in_bits & 0x000000FF) as u8;
 }
 
 pub struct SHA1HashAlgorithm {}
@@ -162,13 +173,7 @@ impl HashAlgorithm for SHA1HashAlgorithm {
     }
 
     fn finalise(&self, final_block: &mut [u8], input_len_bytes: usize, mut state: Self::State) -> Vec<u8> {
-        let length_in_bits = input_len_bytes * 8;
-
-        // set length at end of final block
-        final_block[SHA1_BLOCK_SIZE - 4] = ((length_in_bits & 0xFF000000) >> 24) as u8;
-        final_block[SHA1_BLOCK_SIZE - 3] = ((length_in_bits & 0x00FF0000) >> 16) as u8;;
-        final_block[SHA1_BLOCK_SIZE - 2] = ((length_in_bits & 0x0000FF00) >> 8) as u8;
-        final_block[SHA1_BLOCK_SIZE - 1] = (length_in_bits & 0x000000FF) as u8;
+        write_final_block_length(final_block, input_len_bytes);
 
         sha1_block_operate(&final_block, &mut state);
 
@@ -176,6 +181,137 @@ impl HashAlgorithm for SHA1HashAlgorithm {
         result.to_vec()
     }
 }
+
+const SHA256_INITIAL_HASH: [u32; 8] = [
+    0x6a09e667,
+    0xbb67ae85,
+    0x3c6ef372,
+    0xa54ff53a,
+    0x510e527f,
+    0x9b05688c,
+    0x1f83d9ab,
+    0x5be0cd19,
+];
+
+const SHA256_K: [u32; 64] = [
+    0x428a2f98, 0x71374491, 0xb5c0fbcf, 0xe9b5dba5, 0x3956c25b, 0x59f111f1,
+    0x923f82a4, 0xab1c5ed5, 0xd807aa98, 0x12835b01, 0x243185be, 0x550c7dc3,
+    0x72be5d74, 0x80deb1fe, 0x9bdc06a7, 0xc19bf174, 0xe49b69c1, 0xefbe4786,
+    0x0fc19dc6, 0x240ca1cc, 0x2de92c6f, 0x4a7484aa, 0x5cb0a9dc, 0x76f988da,
+    0x983e5152, 0xa831c66d, 0xb00327c8, 0xbf597fc7, 0xc6e00bf3, 0xd5a79147,
+    0x06ca6351, 0x14292967, 0x27b70a85, 0x2e1b2138, 0x4d2c6dfc, 0x53380d13,
+    0x650a7354, 0x766a0abb, 0x81c2c92e, 0x92722c85, 0xa2bfe8a1, 0xa81a664b,
+    0xc24b8b70, 0xc76c51a3, 0xd192e819, 0xd6990624, 0xf40e3585, 0x106aa070,
+    0x19a4c116, 0x1e376c08, 0x2748774c, 0x34b0bcb5, 0x391c0cb3, 0x4ed8aa4a,
+    0x5b9cca4f, 0x682e6ff3, 0x748f82ee, 0x78a5636f, 0x84c87814, 0x8cc70208,
+    0x90befffa, 0xa4506ceb, 0xbef9a3f7, 0xc67178f2
+];
+
+fn rotr(x: u32, n: u32) -> u32 {
+    (x >> n) | (x << (32 - n))
+}
+
+fn shr(x: u32, n: usize) -> u32 {
+    x >> n
+}
+
+fn sigma_rot(x: u32, i: bool) -> u32 {
+    rotr(x, if i { 6 } else { 2 }) ^ rotr(x, if i { 11 } else { 13 }) ^ rotr(x, if i { 25 } else { 22 })
+}
+
+fn sigma_shr(x: u32, i: bool) -> u32 {
+    rotr(x, if i { 17 } else { 7 }) ^ rotr(x, if i { 19 } else { 18 }) ^ shr(x, if i { 10 } else { 3 })
+}
+
+fn sha_hash_bytes(state: &[u32]) -> Vec<u8> {
+    let mut bytes = vec![0; state.len() * 4];
+
+    for i in 0..state.len() {
+        let be_bytes = state[i].to_be_bytes();
+        let offset = i * 4;
+        bytes[offset..offset + 4].copy_from_slice(&be_bytes);
+    }
+
+    bytes
+}
+
+fn sha256_block_operate(block: &[u8], state: &mut [u32; 8]) {
+    let mut W: [u32; 64] = [0; 64];
+
+    for t in 0..W.len() {
+        // first 16 elements of W are loaded as little-endian from the input block
+        if t <= 15 {
+            W[t] = (block[t * 4] as u32) << 24 |
+                (block[t * 4 + 1] as u32) << 16 |
+                (block[t * 4 + 2] as u32) << 8 |
+                (block[t * 4 + 3] as u32);
+        } else {
+            W[t] = (Wrapping(sigma_shr(W[t - 2], true)) + Wrapping(W[t - 7]) + Wrapping(sigma_shr(W[t - 15], false)) + Wrapping(W[t - 16])).0;
+        }
+    }
+
+    let mut a = state[0];
+    let mut b = state[1];
+    let mut c = state[2];
+    let mut d = state[3];
+    let mut e = state[4];
+    let mut f = state[5];
+    let mut g = state[6];
+    let mut h = state[7];
+
+    for t in 0..W.len() {
+        let T1 = Wrapping(h) + Wrapping(sigma_rot(e, true)) + Wrapping(ch(e, f, g)) + Wrapping(SHA256_K[t]) + Wrapping(W[t]);
+        let T2 = Wrapping(sigma_rot(a, false)) + Wrapping(maj(a, b, c));
+        h = g;
+        g = f;
+        f = e;
+        e = (Wrapping(d) + T1).0;
+        d = c;
+        c = b;
+        b = a;
+        a = (T1 + T2).0;
+    }
+
+    state[0] = (Wrapping(a) + Wrapping(state[0])).0;
+    state[1] = (Wrapping(b) + Wrapping(state[1])).0;
+    state[2] = (Wrapping(c) + Wrapping(state[2])).0;
+    state[3] = (Wrapping(d) + Wrapping(state[3])).0;
+    state[4] = (Wrapping(e) + Wrapping(state[4])).0;
+    state[5] = (Wrapping(f) + Wrapping(state[5])).0;
+    state[6] = (Wrapping(g) + Wrapping(state[6])).0;
+    state[7] = (Wrapping(h) + Wrapping(state[7])).0;
+}
+
+pub struct SHA256HashAlgorithm {}
+
+impl HashAlgorithm for SHA256HashAlgorithm {
+    type State = [u32; 8];
+
+    fn initialise(&self) -> Self::State {
+        SHA256_INITIAL_HASH.clone()
+    }
+
+    fn block_size(&self) -> usize {
+        SHA1_BLOCK_SIZE
+    }
+
+    fn input_block_size(&self) -> usize {
+        SHA1_INPUT_BLOCK_SIZE
+    }
+
+    fn block_operate(&self, block: &[u8], state: &mut Self::State) {
+        sha256_block_operate(block, state);
+    }
+
+    fn finalise(&self, final_block: &mut [u8], input_len_bytes: usize, mut state: Self::State) -> Vec<u8> {
+        write_final_block_length(final_block, input_len_bytes);
+
+        sha256_block_operate(&final_block, &mut state);
+
+        sha_hash_bytes(&state)
+    }
+}
+
 
 #[cfg(test)]
 mod test {
@@ -222,6 +358,28 @@ mod test {
 
         let hash_bytes = hash(&mut source, &alg).expect("Failed to generate hash");
         let expected = hex::read_bytes("0xa9993e364706816aba3e25717850c26c9cd0d89d").expect("Failed to parse hex");
+
+        assert_eq!(&expected, &hash_bytes);
+    }
+
+    #[test]
+    fn sha256_empty_test() {
+        let alg = SHA256HashAlgorithm {};
+        let mut source = io::Cursor::new(&[]);
+        let hash_bytes = hash(&mut source, &alg).expect("Failed to generate hash");
+
+        let expected = hex::read_bytes("0xe3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855").expect("Failed to parse hex");
+
+        assert_eq!(&expected, &hash_bytes);
+    }
+
+    #[test]
+    fn sha256_non_empty_test() {
+        let alg = SHA256HashAlgorithm {};
+        let mut source = io::Cursor::new("thequickbrownfoxjumpedoverthelazydog");
+        let hash_bytes = hash(&mut source, &alg).expect("Failed to generate hash");
+
+        let expected = hex::read_bytes("0x38717b5161c2e817020a0933e1836dd0127bdef59732d77daca20ccfbf61a7ae").expect("Failed to parse hex");
 
         assert_eq!(&expected, &hash_bytes);
     }
