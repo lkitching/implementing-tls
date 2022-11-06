@@ -128,19 +128,6 @@ pub fn sha1_hash(input: &[u8]) -> [u32; SHA1_RESULT_SIZE] {
     hash
 }
 
-// TODO: remove and use sha_hash_bytes
-pub fn sha1_hash_bytes(hash: [u32; SHA1_RESULT_SIZE]) -> [u8; 20] {
-    let mut bytes: [u8; 20] = [0; 20];
-
-    for i in 0..SHA1_RESULT_SIZE {
-        let be_bytes = hash[i].to_be_bytes();
-        let offset = i * 4;
-        bytes[offset..offset + 4].copy_from_slice(&be_bytes);
-    }
-
-    bytes
-}
-
 fn write_final_block_length(final_block: &mut [u8], input_len_bytes: usize) {
     let length_in_bits = input_len_bytes * 8;
 
@@ -177,8 +164,7 @@ impl HashAlgorithm for SHA1HashAlgorithm {
 
         sha1_block_operate(&final_block, &mut state);
 
-        let result = sha1_hash_bytes(state);
-        result.to_vec()
+        sha_hash_bytes(&state)
     }
 }
 
@@ -324,7 +310,7 @@ mod test {
     #[test]
     fn empty_test() {
         let hash = sha1_hash(&[]);
-        let hash_bytes = sha1_hash_bytes(hash);
+        let hash_bytes = sha_hash_bytes(&hash);
         let expected = hex::read_bytes("0xda39a3ee5e6b4b0d3255bfef95601890afd80709").expect("Failed to parse hex");
 
         assert_eq!(&expected, &hash_bytes);
@@ -333,7 +319,7 @@ mod test {
     #[test]
     fn book_test() {
         let hash = sha1_hash("abc".as_bytes());
-        let hash_bytes = sha1_hash_bytes(hash);
+        let hash_bytes = sha_hash_bytes(&hash);
         let expected = hex::read_bytes("0xa9993e364706816aba3e25717850c26c9cd0d89d").expect("Failed to parse hex");
 
         assert_eq!(&expected, &hash_bytes);
