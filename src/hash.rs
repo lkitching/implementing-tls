@@ -11,7 +11,7 @@ pub trait HashAlgorithm {
 
 pub fn hash<R: io::Read, H: HashAlgorithm>(source: &mut R, alg: &H) -> io::Result<Vec<u8>> {
     let mut hash_state = alg.initialise();
-    let mut buf = vec![0u8; alg.input_block_size()];
+    let mut buf = vec![0u8; alg.block_size()];
     let mut total_bytes_read = 0;
 
     // indicates any remaining data to be written to the final block
@@ -37,7 +37,7 @@ pub fn hash<R: io::Read, H: HashAlgorithm>(source: &mut R, alg: &H) -> io::Resul
             // not enough space to include length at the end of the block
             // add an 0x80 byte after the input followed by a sequence of 0s
             // require an additional empty block containing the length
-            let mut padded_block = vec![0u8; alg.input_block_size()];
+            let mut padded_block = vec![0u8; alg.block_size()];
             &mut padded_block[0..last_read].copy_from_slice(&buf[0..last_read]);
             padded_block[last_read] = 0x80;
 
