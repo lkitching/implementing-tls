@@ -1,20 +1,25 @@
-use std::ops::{Add, Sub, Mul, Shl, Div};
+use std::ops::{Add, Sub, Mul, Shl, Div, Neg};
 use std::cmp::{PartialEq, Eq, PartialOrd, Ord, Ordering};
 use std::convert::{From, TryFrom};
 use std::num::{TryFromIntError};
+use std::mem;
 
 #[derive(Copy, Clone, Debug)]
 pub struct TryFromHugeError;
 
-#[derive(Clone)]
+#[derive(Clone, Debug)]
 pub struct Huge {
-    rep: Vec<u8>
+    rep: Vec<u8>,
+    // true indicates number is negative. 0 is treated as positive
+    sign: bool
 }
 
 impl Huge {
     pub fn len(&self) -> usize {
         self.rep.len()
     }
+
+    pub fn is_negative(&self) -> bool { self.sign }
 
     pub fn bytes(&self) -> &[u8] {
         &self.rep
@@ -30,7 +35,8 @@ impl Huge {
             i += 1;
         }
 
-        Huge { rep: bytes[i..].to_vec() }
+        // NOTE: numbers always treated as positive
+        Huge { rep: bytes[i..].to_vec(), sign: false }
     }
 
     pub fn pow(self, exp: Huge) -> Huge {
@@ -74,6 +80,10 @@ impl Huge {
 
         result
     }
+
+    pub fn abs(&self) -> Huge {
+        Huge { rep: self.rep.clone(), sign: false }
+    }
 }
 
 fn expand_buf(buf: &mut Vec<u8>) {
@@ -113,7 +123,6 @@ fn contract_buf(buf: &mut Vec<u8>) {
 
 fn left_shift_buf(buf: &mut Vec<u8>) {
     // NOTE: version in book expects buffer to be non-empty
-    assert!(buf.len() > 0);
 
     let mut old_carry = false;
     let mut carry = false;
@@ -204,11 +213,38 @@ impl Add for Huge {
     type Output = Huge;
 
     fn add(self, rhs: Huge) -> Huge {
-        // create result buffer - this should be large enough to contain either
-        // self or rhs
-        let mut result: Vec<u8> = self.rep.clone();
-        add_buf(&mut result, &rhs.rep);
-        Huge { rep: result }
+        // see if abs(self) > abs(rhs)
+        if buf_magnitude_cmp(&self.rep, &rhs.rep) == Ordering::Greater {
+            // self is larger so result will have same sign as self
+            if self.sign == rhs.sign {
+                // either both positive or both negative
+                // in both cases add buffers together
+                let mut result: Vec<u8> = self.rep.clone();
+                add_buf(&mut result, &rhs.rep);
+                Huge { rep: result, sign: self.sign }
+            } else {
+                // operands have different signs
+                // in both cases, reduce magintude of self by rhs (i.e. operation is either (self - rhs) or (-self + rhs))
+                let mut result: Vec<u8> = self.rep.clone();
+                subtract_buf(&mut result, &rhs.rep);
+                Huge { rep: result, sign: self.sign }
+            }
+        } else {
+            // rhs is larger so result will have same sign as rhs
+            let result_sign = rhs.sign;
+
+            if self.sign == rhs.sign {
+                let mut result: Vec<u8> = rhs.rep.clone();
+                add_buf(&mut result, &self.rep);
+                Huge { rep: result, sign: result_sign }
+            } else {
+                // operands have different signs
+                // in both cases reduce magnitude of rhs by self
+                let mut result: Vec<u8> = rhs.rep.clone();
+                subtract_buf(&mut result, &self.rep);
+                Huge { rep: result, sign: result_sign }
+            }
+        }
     }
 }
 
@@ -237,13 +273,43 @@ impl Sub for Huge {
     type Output = Huge;
 
     fn sub(self, rhs: Huge) -> Huge {
-        if rhs.len() > self.len() {
-            panic!("Result would be negative");
-        }
+        if buf_magnitude_cmp(&self.rep, &rhs.rep) == Ordering::Greater {
+            // magnitude of self is greater than rhs
+            let result_sign = self.sign;
 
-        let mut buf = self.rep;
-        subtract_buf(&mut buf, &rhs.rep);
-        Huge { rep: buf }
+            if self.sign == rhs.sign {
+                // either both positive or both negative
+                // in both cases, magnitude of self will reduce by rhs
+                let mut result = self.rep;
+                subtract_buf(&mut result, &rhs.rep);
+                Huge { rep: result, sign: result_sign }
+            } else {
+                // either self +ve and rhs -ve or self -ve and rhs +ve
+                // in both cases magnitude of result will increase by rhs
+                let mut result = self.rep;
+                add_buf(&mut result, &rhs.rep);
+                Huge { rep: result, sign: result_sign }
+            }
+        } else {
+            // self smaller in magnitude or same size as rhs
+            if self.sign == rhs.sign {
+                // either both positive or both negative
+                // in both cases, magnitude of rhs will decrease by self
+                let mut result = rhs.rep;
+                subtract_buf(&mut result, &self.rep);
+
+                // NOTE: special case if result is 0
+                // sign will be opposite of rhs unless result is 0 in which case it should be false
+                let result_sign = !result.is_empty() && !rhs.sign;
+                Huge { rep: result, sign: result_sign }
+            } else {
+                // either self +ve and rhs -ve or self -ve and rhs +ve
+                // in both cases, magnitude of rhs will increase by self
+                let mut result = rhs.rep;
+                add_buf(&mut result, &self.rep);
+                Huge { rep: result, sign: self.sign }
+            }
+        }
     }
 }
 
@@ -288,8 +354,11 @@ impl Mul for Huge {
     type Output = Huge;
 
     fn mul(self, rhs: Huge) -> Huge {
-        // copy self into temp buffer
+        // move self into temp buffer
         let mut temp = self.rep;
+
+        // result is positive if both are positive or both negative, otherwise negative
+        let result_sign = self.sign != rhs.sign;
 
         // create output buffer
         // TODO: reserve more space? Need to trim at the end anyway!
@@ -306,7 +375,7 @@ impl Mul for Huge {
         }
 
         contract_buf(&mut result);
-        Huge { rep: result }
+        Huge { rep: result, sign: result_sign }
     }
 }
 
@@ -320,14 +389,16 @@ impl Div for Huge {
 
     fn div(self, divisor: Huge) -> Self::Output {
 
+        // result is negative if signs of self (numerator) and divisor are different, otherwise positive
+        let result_sign = self.sign != divisor.sign;
+
         let mut bit_size = 0;
         let mut dividend = self;
         let mut divisor = divisor;
 
         // TODO: clone divisor buffer?
-
-        // left-shift divisor until it's >= the dividend
-        while divisor < dividend {
+        // left-shift divisor until it's magnitude is >= the dividend
+        while buf_magnitude_cmp(&divisor.rep, &dividend.rep) == Ordering::Less {
             left_shift_buf(&mut divisor.rep);
             bit_size += 1;
         }
@@ -340,7 +411,7 @@ impl Div for Huge {
         let mut bit_position = 8 - (bit_size % 8) - 1;
 
         loop {
-            if divisor <= dividend {
+            if buf_magnitude_cmp(&divisor.rep, &dividend.rep) != Ordering::Greater {
                 subtract_buf(&mut dividend.rep, &divisor.rep);
                 quot_buf[(bit_position / 8) as usize] |= (0x80 >> (bit_position % 8));
             }
@@ -355,13 +426,29 @@ impl Div for Huge {
         }
 
         DivResult {
-            quotient: Huge { rep: quot_buf },
-            remainder: dividend,
+            quotient: Huge { rep: quot_buf, sign: result_sign },
+            remainder: dividend
         }
     }
 }
 
-fn buf_cmp(h1: &Vec<u8>, h2: &Vec<u8>) -> Ordering {
+impl Neg for Huge {
+    type Output = Self;
+
+    fn neg(mut self) -> Self::Output {
+        if self.rep.is_empty() {
+            // -0 == 0
+            self
+        } else {
+            self.sign = !self.sign;
+            self
+        }
+    }
+}
+
+// Compares the magnitudes of two Huge buffers
+// NOTE: This does not use the signs which should be done within the high-level operators
+fn buf_magnitude_cmp(h1: &Vec<u8>, h2: &Vec<u8>) -> Ordering {
     if h1.len() > h2.len() {
         Ordering::Greater
     } else if h2.len() > h1.len() {
@@ -383,7 +470,7 @@ fn buf_cmp(h1: &Vec<u8>, h2: &Vec<u8>) -> Ordering {
 
 impl PartialEq for Huge {
     fn eq(&self, other: &Self) -> bool {
-        buf_cmp(&self.rep, &other.rep) == Ordering::Equal
+        self.sign == other.sign && buf_magnitude_cmp(&self.rep, &other.rep) == Ordering::Equal
     }
 }
 
@@ -391,19 +478,49 @@ impl Eq for Huge {}
 
 impl PartialOrd for Huge {
     fn partial_cmp(&self, other: &Self) -> Option<Ordering> {
-        Some(buf_cmp(&self.rep, &other.rep))
+        let ord = match (self.sign, other.sign) {
+            (false, false) => { buf_magnitude_cmp(&self.rep, &other.rep) }
+            (false, true) => { Ordering::Greater }
+            (true, false) => { Ordering::Less },
+            (true, true) => {
+                // both negative
+                // larger number is the one with the smaller magnitude
+                buf_magnitude_cmp(&other.rep, &self.rep)
+            }
+        };
+        Some(ord)
     }
 }
 
 impl Ord for Huge {
     fn cmp(&self, other: &Huge) -> Ordering {
-        buf_cmp(&self.rep, &other.rep)
+        buf_magnitude_cmp(&self.rep, &other.rep)
     }
 }
 
 impl From<u8> for Huge {
     fn from(b: u8) -> Huge {
-        Huge { rep: vec![b] }
+        let mut rep = vec![b];
+        contract_buf(&mut rep);
+        Huge { rep, sign: false }
+    }
+}
+
+impl From<i8> for Huge {
+    fn from(b: i8) -> Huge {
+        if b.is_negative() {
+            let rb = if b == i8::MIN {
+                128u8
+            } else {
+                !(b - 1) as u8
+            };
+
+            Huge { rep: vec![rb], sign: true }
+        } else {
+            let mut rep = vec![b as u8];
+            contract_buf(&mut rep);
+            Huge { rep, sign: false }
+        }
     }
 }
 
@@ -413,7 +530,24 @@ impl From<usize> for Huge {
 
         // remove leading 0 bytes
         let rep: Vec<u8> = bytes.into_iter().skip_while(|b| **b == 0).map(|b| *b).collect();
-        Huge { rep }
+        Huge { rep, sign: false }
+    }
+}
+
+impl From<isize> for Huge {
+    fn from(num: isize) -> Huge {
+        if num == isize::MIN {
+            let len = mem::size_of::<isize>();
+            let mut bytes: Vec<u8> = vec![0; len];
+            bytes[0] = 0x80;
+            Huge { rep: bytes, sign: true }
+        } else if num.is_negative() {
+            let mut h = Huge::from(! (num - 1) as usize);
+            h.sign = true;
+            h
+        } else {
+            Huge::from(num as usize)
+        }
     }
 }
 
@@ -423,6 +557,29 @@ impl TryFrom<Huge> for u8 {
         match value.len() {
             0 => { Ok(0) },
             1 => { Ok(value.rep[0]) },
+            _ => { Err(TryFromHugeError) }
+        }
+    }
+}
+
+impl TryFrom<Huge> for i8 {
+    type Error = TryFromHugeError;
+    fn try_from(value: Huge) -> Result<i8, TryFromHugeError> {
+        match value.len() {
+            0 => { Ok(0) },
+            1 => {
+                let b = value.rep[0];
+                if value.sign && b > 128 || !value.sign && b > 127 {
+                    Err(TryFromHugeError)
+                } else {
+                    let bs = if value.is_negative() {
+                        [!b + 1]
+                    } else {
+                        [b]
+                    };
+                    Ok(i8::from_be_bytes(bs))
+                }
+            }
             _ => { Err(TryFromHugeError) }
         }
     }
@@ -445,10 +602,153 @@ impl TryFrom<Huge> for usize {
     }
 }
 
+impl TryFrom<Huge> for isize {
+    type Error = TryFromHugeError;
+    fn try_from(value: Huge) -> Result<isize, TryFromHugeError> {
+        let max_len = (usize::BITS / 8) as usize;
+        if value.rep.len() > max_len {
+            Err(TryFromHugeError)
+        } else {
+            let mut le_bytes = [0; 8];
+            let offset = 8 - value.rep.len();
+            for i in 0..value.rep.len() {
+                le_bytes[i + offset] = value.rep[i];
+            }
+
+            if value.sign && le_bytes[0] > 0x80 || !value.sign && le_bytes[0] > 0x7f {
+                Err(TryFromHugeError)
+            } else {
+                let i = isize::from_be_bytes(le_bytes);
+                if value.is_negative() {
+                    Ok(!(i - 1))
+                } else {
+                    Ok(i)
+                }
+            }
+        }
+    }
+}
+
 #[cfg(test)]
 mod test {
     use super::*;
     use std::convert::{TryInto};
+
+    #[test]
+    fn from_u8_zero() {
+        let h = Huge::from(0u8);
+        assert_eq!(0, h.len());
+        assert!(!h.is_negative());
+    }
+
+    #[test]
+    fn from_usize() {
+        assert_eq!(Huge::from(194u8), Huge::from(194usize));
+    }
+
+    #[test]
+    fn from_usize_zero() {
+        let h = Huge::from(0usize);
+        assert_eq!(0, h.len());
+        assert_eq!(Huge::from(0u8), h);
+    }
+
+    #[test]
+    fn from_usize_len() {
+        let value = usize::from_be_bytes([0x00, 0x00, 0x12, 0x45, 0x83, 0xf2, 0x39, 0xae]);
+        let h = Huge::from(value);
+        assert_eq!(6, h.len());
+    }
+
+    #[test]
+    fn round_trip_usize() {
+        let u: usize = 234543829;
+        let h = Huge::from(u);
+        assert_eq!(u, usize::try_from(h).unwrap());
+    }
+
+    #[test]
+    fn from_i8_positive() {
+        let h = Huge::from(108i8);
+        assert_eq!(Huge::from(108u8), h);
+    }
+
+    #[test]
+    fn from_i8_zero() {
+        let h = Huge::from(0i8);
+        assert_eq!(Huge::from(0u8), h)
+    }
+
+    #[test]
+    fn from_i8_negative() {
+        let h = Huge::from(-119i8);
+        assert!(h.is_negative());
+
+        assert_eq!(-Huge::from(119u8), h);
+    }
+
+    #[test]
+    fn from_i8_min() {
+        let h = Huge::from(i8::MIN);
+        let n = isize::try_from(h).expect("Failed to convert");
+        assert_eq!(i8::MIN as isize, n);
+    }
+
+    #[test]
+    fn from_isize_positive() {
+        let h = Huge::from(86isize);
+        let expected = Huge::from(86u8);
+        assert_eq!(expected, h);
+    }
+
+    #[test]
+    fn from_isize_zero() {
+        let h = Huge::from(0isize);
+        let expected = Huge::from(0u8);
+        assert_eq!(expected, h);
+    }
+
+    #[test]
+    fn from_isize_negative() {
+        let h = Huge::from(-1986411isize);
+        assert!(h.is_negative());
+    }
+
+    #[test]
+    fn from_isize_min() {
+        let h = Huge::from(isize::MIN);
+        assert!(h.is_negative());
+    }
+
+    #[test]
+    fn isize_positive_round_trip() {
+        let n: isize = 7662498711;
+        let h = Huge::from(n);
+        let retrieved = isize::try_from(h).expect("Failed to convert");
+
+        assert_eq!(n, retrieved);
+    }
+
+    #[test]
+    fn isize_negative_round_trip() {
+        let n: isize = -87664289;
+        let h = Huge::from(n);
+
+        let retrieved = isize::try_from(h).expect("Failed to convert");
+        assert_eq!(n, retrieved);
+    }
+
+    #[test]
+    fn abs_small() {
+        let h1 = Huge::from(-58isize);
+        assert_eq!(Huge::from(58u8), h1.abs());
+    }
+
+    #[test]
+    fn abs_large() {
+        let h = Huge::from(-3369871573isize);
+        assert_eq!(Huge::from(3369871573usize), h.abs());
+    }
 
     #[test]
     fn add_bytes() {
@@ -468,23 +768,72 @@ mod test {
     }
 
     #[test]
-    fn from_usize_zero() {
-        let h = Huge::from(0usize);
-        assert_eq!(0, h.len());
+    fn add_positive_positive() {
+        let u1 = 8896712usize;
+        let u2 = 779315usize;
+        let result = Huge::from(u1) + Huge::from(u2);
+
+        let expected = u1 + u2;
+        assert_eq!(expected, usize::try_from(result).expect("Failed to convert"));
     }
 
     #[test]
-    fn from_usize_len() {
-        let value = usize::from_be_bytes([0x00, 0x00, 0x12, 0x45, 0x83, 0xf2, 0x39, 0xae]);
-        let h = Huge::from(value);
-        assert_eq!(6, h.len());
+    fn add_positive_smaller_negative() {
+        let u1 = 9987462348isize;
+        let u2 = -12289isize;
+        let result = Huge::from(u1) + Huge::from(u2);
+
+        let expected = u1 + u2;
+        assert_eq!(expected, isize::try_from(result).expect("Failed to convert"));
     }
 
     #[test]
-    fn round_trip_usize() {
-        let u: usize = 234543829;
-        let h = Huge::from(u);
-        assert_eq!(u, usize::try_from(h).unwrap());
+    fn add_positive_larger_negative() {
+        let u1 = 88964isize;
+        let u2 = -7788569642isize;
+        let result = Huge::from(u1) + Huge::from(u2);
+
+        let expected = u1 + u2;
+        assert_eq!(expected, isize::try_from(result).expect("Failed to convert"));
+    }
+
+    #[test]
+    fn add_positive_negation() {
+        let n = 78357891isize;
+        let result = Huge::from(n) + Huge::from(-n);
+
+        assert_eq!(0, result.len());
+        assert_eq!(0, u8::try_from(result).expect("Failed to convert"));
+    }
+
+    #[test]
+    fn add_negative_smaller_positive() {
+        let n1 = -11589964837isize;
+        let n2 = 15894isize;
+        let result = Huge::from(n1) + Huge::from(n2);
+
+        let expected = n1 + n2;
+        assert_eq!(expected, isize::try_from(result).expect("Failed to convert"));
+    }
+
+    #[test]
+    fn add_negative_larger_positive() {
+        let n1 = -25976isize;
+        let n2 = 778964535498isize;
+        let result = Huge::from(n1) + Huge::from(n2);
+
+        let expected = n1 + n2;
+        assert_eq!(expected, isize::try_from(result).expect("Failed to convert"));
+    }
+
+    #[test]
+    fn add_negative_negative() {
+        let n1 = -25976isize;
+        let n2 = -89i8;
+        let result = Huge::from(n1) + Huge::from(n2);
+
+        let expected = n1 + (n2 as isize);
+        assert_eq!(expected, isize::try_from(result).expect("Failed to convert"));
     }
 
     #[test]
@@ -516,13 +865,84 @@ mod test {
     }
 
     #[test]
-    fn subtract_same() {
+    fn subtract_positive_self() {
         let h1 = Huge::from(123u8);
         let h2 = Huge::from(123u8);
         let result = h1 - h2;
 
         assert_eq!(0, result.len());
+        assert!(!result.is_negative());
         assert_eq!(0, u8::try_from(result).unwrap());
+    }
+
+    #[test]
+    fn subtract_positive_smaller_positive() {
+        let n1 = 8976348usize;
+        let n2 = 11896usize;
+        let result = Huge::from(n1) - Huge::from(n2);
+
+        let expected = n1 - n2;
+        assert_eq!(expected, usize::try_from(result).expect("Failed to convert"));
+    }
+
+    #[test]
+    fn subtract_positive_larger_positive() {
+        let n1 = 2258isize;
+        let n2 = 5589786478isize;
+        let result = Huge::from(n1) - Huge::from(n2);
+
+        let expected = n1 - n2;
+        assert_eq!(expected, isize::try_from(result).expect("Failed to convert"));
+    }
+
+    #[test]
+    fn subtract_positive_negative() {
+        let n1 = 25978isize;
+        let n2 = -78963isize;
+        let result = Huge::from(n1) - Huge::from(n2);
+
+        let expected = n1 - n2;
+        assert_eq!(expected, isize::try_from(result).expect("Failed to convert"));
+    }
+
+    #[test]
+    fn subtract_negative_positive() {
+        let n1 = -897864isize;
+        let n2 = 53712isize;
+        let result = Huge::from(n1) - Huge::from(n2);
+
+        let expected = n1 - n2;
+        assert_eq!(expected, isize::try_from(result).expect("Failed to convert"));
+    }
+
+    #[test]
+    fn subtract_negative_smaller_negative() {
+        let n1 = -67748432isize;
+        let n2 = -32318isize;
+        let result = Huge::from(n1) - Huge::from(n2);
+
+        let expected = n1 - n2;
+        assert_eq!(expected, isize::try_from(result).expect("Failed to convert"));
+    }
+
+    #[test]
+    fn subtract_negative_larger_negative() {
+        let n1 = -289765isize;
+        let n2 = -33998477458isize;
+        let result = Huge::from(n1) - Huge::from(n2);
+
+        let expected = n1 - n2;
+        assert_eq!(expected, isize::try_from(result).expect("Failed to convert"));
+    }
+
+    #[test]
+    fn subtract_negative_self() {
+        let n = -25789isize;
+        let result = Huge::from(n) - Huge::from(n);
+
+        assert_eq!(0, result.len());
+        assert!(!result.is_negative());
+        assert_eq!(0, u8::try_from(result).expect("Failed to convert"));
     }
 
     #[test]
@@ -571,6 +991,26 @@ mod test {
     }
 
     #[test]
+    fn mul_positive_negative() {
+        let n1 = 762319isize;
+        let n2 = -87658isize;
+        let result = Huge::from(n1) * Huge::from(n2);
+
+        let expected = n1 * n2;
+        assert_eq!(expected, isize::try_from(result).expect("Failed to convert"));
+    }
+
+    #[test]
+    fn mul_negative_negative() {
+        let n1 = -57159isize;
+        let n2 = -32874isize;
+        let result = Huge::from(n1) * Huge::from(n2);
+
+        let expected = n1 * n2;
+        assert_eq!(expected, isize::try_from(result).expect("Failed to convert"));
+    }
+
+    #[test]
     fn cmp_small_less() {
         assert!(Huge::from(14u8) < Huge::from(189u8));
     }
@@ -598,7 +1038,7 @@ mod test {
     #[test]
     fn cmp_large_equal() {
         let n = 357901248342usize;
-        assert!(Huge::from(n) == Huge::from(n));
+        assert_eq!(Huge::from(n), Huge::from(n));
     }
 
     #[test]
@@ -637,12 +1077,42 @@ mod test {
     }
 
     #[test]
+    fn div_positive_negative() {
+        let numerator = 6748961isize;
+        let divisor = -786isize;
+        let DivResult { quotient, remainder } = Huge::from(numerator) / Huge::from(divisor);
+
+        assert_eq!(numerator / divisor, isize::try_from(quotient).expect("Failed to convert quotient"));
+        assert_eq!(numerator.rem_euclid(divisor), isize::try_from(remainder).expect("Failed to convert remainder"));
+    }
+
+    #[test]
+    fn div_negative_positive() {
+        let numerator = -7539896isize;
+        let divisor = 2817isize;
+        let DivResult { quotient, remainder } = Huge::from(numerator) / Huge::from(divisor);
+
+        assert_eq!(numerator / divisor, isize::try_from(quotient).expect("Failed to convert quotient"));
+        assert_eq!(numerator % divisor, isize::try_from(remainder).expect("Failed to convert remainder"));
+    }
+
+    #[test]
+    fn div_negative_negative() {
+        let numerator = -875963285isize;
+        let divisor = -18357isize;
+        let DivResult { quotient, remainder } = Huge::from(numerator) / Huge::from(divisor);
+
+        assert_eq!(numerator / divisor, isize::try_from(quotient).expect("Failed to convert quotient"));
+        assert_eq!(numerator % divisor, isize::try_from(remainder).expect("Failed to convert remainder"));
+    }
+
+    #[test]
     fn pow_small() {
         let n = Huge::from(3u8);
         let e = Huge::from(6u8);
         let result = n.pow(e);
 
-        assert!(result == Huge::from(729usize))
+        assert_eq!(result, Huge::from(729usize))
     }
 
     #[test]
@@ -651,7 +1121,7 @@ mod test {
         let e = Huge::from(7u8);
         let result = n.pow(e);
 
-        assert!(result == Huge::from(739056281869446093usize));
+        assert_eq!(result, Huge::from(739056281869446093usize));
     }
 
     #[test]
@@ -661,7 +1131,7 @@ mod test {
         let n = Huge::from(11u8);
 
         let result = x.mod_pow(e, n);
-        assert!(result == Huge::from(4u8))
+        assert_eq!(result, Huge::from(4u8))
     }
 
     #[test]
@@ -671,6 +1141,6 @@ mod test {
         let n = Huge::from(122u8);
 
         let result = x.mod_pow(e, n);
-        assert!(result == Huge::from(89u8));
+        assert_eq!(result, Huge::from(89u8));
     }
 }
