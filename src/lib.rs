@@ -12,3 +12,4 @@ pub mod md5;
 pub mod sha;
 pub mod hash;
 pub mod hmac;
+pub mod dsa;

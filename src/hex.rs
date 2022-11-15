@@ -56,6 +56,14 @@ pub fn read_bytes(s: &str) -> Result<Vec<u8>, String> {
     }
 }
 
+pub fn format_hex(bytes: &[u8]) -> String {
+    let mut s = String::with_capacity(bytes.len() * 2);
+    for b in bytes.iter() {
+        s.push_str(&format!("{:02x}", b));
+    }
+    s
+}
+
 pub fn show_hex(bytes: &[u8]) {
     for b in bytes.iter() {
         print!("{:02x}", b);

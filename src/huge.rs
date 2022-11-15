@@ -3,6 +3,7 @@ use std::cmp::{PartialEq, Eq, PartialOrd, Ord, Ordering};
 use std::convert::{From, TryFrom};
 use std::num::{TryFromIntError};
 use std::mem;
+use crate::hex;
 
 #[derive(Copy, Clone, Debug)]
 pub struct TryFromHugeError;
@@ -125,7 +126,9 @@ impl Huge {
         // NOTE: division can return a negative modulus
         // In this case, subtract a again and make positive
         let mut h = Huge::ext_euclid(z, a);
+
         if h.is_negative() {
+            h.sign = false;
             h = h - a_tmp;
             h.sign = false;
         }

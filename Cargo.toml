@@ -34,3 +34,7 @@ path="src/rsa/main.rs"
 [[bin]]
 name="digest"
 path="src/digest/main.rs"
+
+[[bin]]
+name="dsa"
+path="src/dsa/main.rs"
