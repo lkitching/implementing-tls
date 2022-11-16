@@ -21,8 +21,18 @@ impl Huge {
 
     pub fn is_negative(&self) -> bool { self.sign }
 
+    pub fn is_zero(&self) -> bool { self.rep.is_empty() }
+
     pub fn bytes(&self) -> &[u8] {
         &self.rep
+    }
+
+    pub fn zero() -> Huge {
+        Huge { rep: Vec::new(), sign: false }
+    }
+
+    pub fn one() -> Huge {
+        Huge::from(1u8)
     }
 
     pub fn from_bytes(bytes: &[u8]) -> Self {
@@ -83,6 +93,44 @@ impl Huge {
 
     pub fn abs(&self) -> Huge {
         Huge { rep: self.rep.clone(), sign: false }
+    }
+
+    pub fn modulo(self, n: Huge) -> Huge {
+        let DivResult { remainder, .. } = self / n;
+        remainder
+    }
+
+    pub fn ext_euclid(z: Huge, a: Huge) -> Huge {
+        let mut i = a.clone();
+        let mut j = z;
+
+        let mut y2 = Huge::zero();
+        let mut y1 = Huge::one();
+
+        while j > Huge::zero() {
+            let DivResult { quotient, remainder } = i / j.clone();
+            let y = y2 - (y1.clone() * quotient);
+            i = j;
+            j = remainder;
+            y2 = y1;
+            y1 = y;
+        }
+
+        y2.clone().modulo(a)
+    }
+
+    pub fn inv(z: Huge, a: Huge) -> Huge {
+        let a_tmp = a.clone();
+
+        // NOTE: division can return a negative modulus
+        // In this case, subtract a again and make positive
+        let mut h = Huge::ext_euclid(z, a);
+        if h.is_negative() {
+            h = h - a_tmp;
+            h.sign = false;
+        }
+
+        h
     }
 }
 
