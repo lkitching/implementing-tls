@@ -10,6 +10,7 @@ edition = "2018"
 url = "2.2.2"
 clap = { version = "3.1.6", features = ["derive"] }
 hex = "0.4.3"
+num_enum = "0.5.7"
 
 [[bin]]
 name="http_client"
@@ -38,3 +39,7 @@ path="src/digest/main.rs"
 [[bin]]
 name="dsa"
 path="src/dsa/main.rs"
+
+[[bin]]
+name="asn1"
+path="src/asn1/main.rs"

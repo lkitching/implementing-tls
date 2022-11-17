@@ -13,3 +13,5 @@ pub mod sha;
 pub mod hash;
 pub mod hmac;
 pub mod dsa;
+pub mod x509;
+pub mod asn1;
