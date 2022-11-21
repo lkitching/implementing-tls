@@ -2,8 +2,8 @@ use crate::huge::{Huge, DivResult};
 use crate::hex;
 
 pub struct RSAKey {
-    modulus: Huge,
-    exponent: Huge
+    pub modulus: Huge,
+    pub exponent: Huge
 }
 
 impl RSAKey {
@@ -65,7 +65,9 @@ pub fn rsa_decrypt(private_key: &RSAKey, ciphertext: &[u8]) -> Vec<u8> {
     for block in ciphertext.chunks_exact(modulus_len) {
         let c = Huge::from_bytes(block);
         let m = c.mod_pow(private_key.exponent.clone(), private_key.modulus.clone());
-        let padded_block = m.bytes();
+
+        let mut padded_block = vec![0; modulus_len];
+        m.unload(&mut padded_block[..]);
 
         if padded_block[1] > 0x02 {
             panic!("Decryption error or unrecognised block type");
@@ -120,11 +122,11 @@ pub mod test {
         let m = Huge::from(688usize);
 
         let c = rsa_compute(m.clone(), e, n.clone());
-        assert!(c == Huge::from(1570usize));
+        assert_eq!(c, Huge::from(1570usize));
 
         // decrypt with different exponent
         let pt = rsa_compute(c, d, n);
-        assert!(pt == m);
+        assert_eq!(pt, m);
     }
 
     #[test]

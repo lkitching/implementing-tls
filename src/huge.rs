@@ -50,6 +50,12 @@ impl Huge {
         Huge { rep: bytes[i..].to_vec(), sign: false }
     }
 
+    pub fn unload(&self, dest: &mut [u8]) {
+        // write bytes to the end of the dest buffer
+        let offset = dest.len() - self.bytes().len();
+        (&mut dest[offset..]).copy_from_slice(self.rep.as_slice())
+    }
+
     pub fn pow(self, exp: Huge) -> Huge {
 
         let mut tmp1 = self.clone();
@@ -1193,5 +1199,22 @@ mod test {
 
         let result = x.mod_pow(e, n);
         assert_eq!(result, Huge::from(89u8));
+    }
+
+    #[test]
+    fn mod_pow_cert() {
+        let c_bytes = hex::read_bytes("0x7ac2fe6baa2617f536371afcbcc7cf5f9d6753f56b1fb4d4199a42125df6b0487745bf7fd6ff3933114078f0ab54987dba9bb6e482e52de39f49b27478f35b5a").expect("Failed to parse hex");
+        let m_bytes = hex::read_bytes("0xc308c43564e048c38b5ee0f2d5123a6c6c23270f14a54b31d5cc61348a421f3e474e50c5bb7bc0334531c3fbde99cfcfbc4b613fd8e4bfd595bd390a42754ad7").expect("Failed to parse hex");
+        let e_bytes = hex::read_bytes("0x010001").expect("Failed to parse hex");
+
+        let c = Huge::from_bytes(c_bytes.as_slice());
+        let m = Huge::from_bytes(m_bytes.as_slice());
+        let e = Huge::from_bytes(e_bytes.as_slice());
+        let result = c.mod_pow(e, m);
+
+        let expected_bytes = hex::read_bytes("0x01ffffffffffffffffffffffffffffffffffffffffffffffffffff003021300906052b0e03021a050004141556f0449f521eb2b741d16a486062d59ca5a9ea").expect("Failed to parse hex");
+        let expected = Huge::from_bytes(expected_bytes.as_slice());
+
+        assert_eq!(expected, result);
     }
 }

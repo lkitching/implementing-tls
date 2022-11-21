@@ -15,3 +15,5 @@ pub mod hmac;
 pub mod dsa;
 pub mod x509;
 pub mod asn1;
+pub mod pem;
+pub mod files;

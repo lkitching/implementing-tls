@@ -50,21 +50,35 @@ pub enum TagType {
 
 #[derive(Debug, Copy, Clone)]
 pub struct Tag {
-    constructed: bool,
-    class: TagClass,
-    tag_type: TagType
+    pub constructed: bool,
+    pub class: TagClass,
+    pub tag_type: TagType
 }
 
 pub struct ASN1Item {
     tag: Tag,
-    data: Vec<u8>,
+    node_data: Vec<u8>,
+    data_offset: usize,
     children: Vec<ASN1Item>
 }
 
+impl ASN1Item {
+    pub fn leaf(tag: Tag, data: Vec<u8>) -> ASN1Item {
+        ASN1Item { tag, node_data: data, data_offset: 0, children: Vec::new() }
+    }
+}
+
+impl ASN1Item {
+    pub fn tag(&self) -> &Tag { &self.tag }
+    pub fn data(&self) -> &[u8] { &self.node_data[self.data_offset..] }
+    pub fn node_data(&self) -> &[u8] { &self.node_data.as_slice() }
+    pub fn children(&self) -> &[ASN1Item] { &self.children[..] }
+}
+
 // TODO: return Result
-fn parse_tag(buf: &[u8]) -> (Tag, &[u8]) {
+fn parse_tag(buf: &[u8]) -> (Tag, usize) {
     let tag_byte = buf[0];
-    let mut i = 1;
+    let mut tag_length = 1;
 
     // If bits 1-5 are all set, tag is variable length
     // NOTE: not used in X.509
@@ -92,15 +106,15 @@ fn parse_tag(buf: &[u8]) -> (Tag, &[u8]) {
     let ty = TagType::try_from(type_value).expect("Invalid type value");
     let tag = Tag { constructed, class, tag_type: ty };
 
-    (tag, &buf[i..])
+    (tag, tag_length)
 }
 
 // TODO: return Result
-fn parse_length(buf: &[u8]) -> (usize, &[u8]) {
+fn parse_length(buf: &[u8]) -> (usize, usize) {
     let tag_length_byte = buf[0];
 
     // if the high bit is set in the length byte, the lower 7 bytes encode the length of the length
-    let (i, length) = if tag_length_byte & 0x80 == 0x80 {
+    let (length_segment_length, length) = if tag_length_byte & 0x80 == 0x80 {
         let length_length = tag_length_byte & 0x7F;
         let mut len = 0;
         for i in 1..=length_length {
@@ -112,16 +126,16 @@ fn parse_length(buf: &[u8]) -> (usize, &[u8]) {
         (1, tag_length_byte as usize)
     };
 
-    (length, &buf[i..])
+    (length, length_segment_length)
 }
 
 // TODO: return Result
 pub fn parse_node(buf: &[u8]) -> (ASN1Item, &[u8]) {
-    let mut remaining = buf;
-
-    let (tag, remaining) = parse_tag(remaining);
-    let (length, remaining) = parse_length(remaining);
-    let data = remaining[0..length].to_vec();
+    let (tag, tag_length) = parse_tag(buf);
+    let (length, length_segment_length) = parse_length(&buf[tag_length..]);
+    let data_offset = tag_length + length_segment_length;
+    let data_end = data_offset + length;
+    let data = buf[data_offset..data_end].to_vec();
     let mut children = Vec::new();
 
     if tag.constructed {
@@ -133,10 +147,12 @@ pub fn parse_node(buf: &[u8]) -> (ASN1Item, &[u8]) {
         }
     }
 
-    (ASN1Item { tag, data, children }, &remaining[length..])
+    (ASN1Item { tag, node_data: buf[0..data_end].to_vec(), data_offset, children }, &buf[data_end..])
 }
 
-pub fn parse(buf: &[u8]) -> Result<ASN1Item, String> {
+pub type ASN1Error = String;
+
+pub fn parse(buf: &[u8]) -> Result<ASN1Item, ASN1Error> {
     let (root, remaining) = parse_node(&buf[..]);
     // TODO: validate properly
     assert!(remaining.is_empty(), "");
@@ -152,16 +168,16 @@ fn pretty_print_node(node: &ASN1Item, indent: usize) {
     };
 
     let value = match node.tag.tag_type {
-        TagType::ObjectIdentifier => {
-            hex::format_hex(&node.data[..])
+        TagType::BitString | TagType::OctetString | TagType::ObjectIdentifier => {
+            hex::format_hex(&node.node_data[..])
         },
         TagType::UTF8String => {
-            String::from_utf8(node.data.clone()).expect("Invalid UTF-8 string")
+            String::from_utf8(node.node_data.clone()).expect("Invalid UTF-8 string")
         },
         _ => { String::new() }
     };
 
-    println!("{}{} ({}, {}) {}", "  ".repeat(indent), type_desc, node.tag.tag_type as u8, node.data.len(), value);
+    println!("{}{} ({}, {}) {}", "  ".repeat(indent), type_desc, node.tag.tag_type as u8, node.node_data.len(), value);
 
     for child in node.children.iter() {
         pretty_print_node(child, indent + 1);
@@ -181,19 +197,19 @@ pub mod test {
     #[test]
     fn parse_length_single() {
         let bytes = vec![0x28];
-        let (len, remaining) = parse_length(&bytes[..]);
+        let (len, length_segment_length) = parse_length(&bytes[..]);
 
         assert_eq!(0x28usize, len);
-        assert!(remaining.is_empty());
+        assert_eq!(1, length_segment_length);
     }
 
     #[test]
     fn parse_length_multiple() {
         let bytes = vec![0x82, 0x03, 0x49, 0x01, 0x02];
-        let (len, remaining) = parse_length(&bytes[..]);
+        let (len, length_segment_length) = parse_length(&bytes[..]);
 
         assert_eq!(841, len);
-        assert_eq!(&bytes[3..], remaining);
+        assert_eq!(3, length_segment_length);
     }
 
     #[test]
@@ -207,18 +223,9 @@ pub mod test {
 
         assert_eq!(false, node.tag.constructed);
         assert_eq!(TagType::Integer, node.tag.tag_type);
-        assert_eq!(1, node.data.len());
+        assert_eq!(1, node.data().len());
+        assert_eq!(bytes, node.node_data);
 
         assert!(remaining.is_empty());
-    }
-
-    #[test]
-    fn wat() {
-        let path = "/home/lee/tmp/implementing_ssl/cert.der";
-        let mut f = fs::File::open(path).expect("Failed to open certificate file");
-        let mut bytes = Vec::new();
-        let bytes_read = f.read_to_end(&mut bytes).expect("Failed to read certficate file");
-
-        let cert = parse(&bytes[..]).expect("Failed to parse ASN1");
     }
 }

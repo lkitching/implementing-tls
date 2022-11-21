@@ -11,6 +11,7 @@ url = "2.2.2"
 clap = { version = "3.1.6", features = ["derive"] }
 hex = "0.4.3"
 num_enum = "0.5.7"
+chrono = "0.4.23"
 
 [[bin]]
 name="http_client"
@@ -43,3 +44,7 @@ path="src/dsa/main.rs"
 [[bin]]
 name="asn1"
 path="src/asn1/main.rs"
+
+[[bin]]
+name="x509"
+path="src/x509/main.rs"
