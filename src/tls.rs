@@ -7,7 +7,7 @@ trait FixedBinarySize {
 }
 
 trait BinarySerialisable {
-    fn write_to(&self, writer: &mut Vec<u8>);
+    fn write_to(&self, buf: &mut Vec<u8>);
     fn write_to_vec(&self) -> Vec<u8> {
         let mut v = Vec::new();
         self.write_to(&mut v);
@@ -207,6 +207,59 @@ struct TLSParameters {
     client_random: Random
 }
 
+#[derive(Debug, PartialEq, Eq, Clone, Copy, TryFromPrimitive)]
+#[repr(u8)]
+#[allow(non_camel_case_types)]
+enum HandshakeType {
+    HELLO_REQUEST = 0,
+    CLIENT_HELLO = 1,
+    SERVER_HELLO = 2,
+    CERTIFICATE = 11,
+    SERVER_KEY_EXCHANGE = 12,
+    CERTIFICATE_REQUEST = 13,
+    SERVER_HELLO_DONE = 14,
+    CERTIFICATE_VERIFY = 15,
+    CLIENT_KEY_EXCHANGE = 16,
+    FINISHED = 20
+}
+
+impl BinarySerialisable for HandshakeType {
+    fn write_to(&self, buf: &mut Vec<u8>) {
+        (*self as u8).write_to(buf);
+    }
+}
+
+trait HandshakeMessage {
+    fn handshake_message_type(&self) -> HandshakeType;
+}
+
+impl HandshakeMessage for ClientHello {
+    fn handshake_message_type(&self) -> HandshakeType {
+        HandshakeType::CLIENT_HELLO
+    }
+}
+
+struct Handshake<T>(T);
+
+impl <T: HandshakeMessage + BinarySerialisable> BinarySerialisable for Handshake<T> {
+    fn write_to(&self, buf: &mut Vec<u8>) {
+        let msg = &self.0;
+        let tmp = msg.write_to_vec();
+
+        // write message type
+        msg.handshake_message_type().write_to(buf);
+
+        // write inner message length
+        // message length field is 3 bytes (24 bits)
+        // TODO: validate message length fits? Should always be enough!
+        let len_bytes = tmp.len().to_be_bytes();
+        buf.extend_from_slice(&len_bytes[(len_bytes.len() - 3) ..]);
+
+        // write inner message
+        buf.extend_from_slice(tmp.as_slice());
+    }
+}
+
 fn send_client_hello<W: Write>(dest: &mut W, params: &TLSParameters) -> Result<(), String> {
     let hello = ClientHello {
         client_version: TLS_VERSION,
@@ -217,4 +270,15 @@ fn send_client_hello<W: Write>(dest: &mut W, params: &TLSParameters) -> Result<(
     };
 
     Ok(())
+}
+
+fn send_handshake_message<W: Write, H: HandshakeMessage + BinarySerialisable>(dest: &mut W, msg: H) -> Result<(), String> {
+    let buf = Handshake(msg).write_to_vec();
+    // TODO: update handshake message digests
+
+    send_message(dest, buf.as_slice())
+}
+
+fn send_message<W: Write>(dest: &mut W, buf: &[u8]) -> Result<(), String> {
+    todo!()
 }
