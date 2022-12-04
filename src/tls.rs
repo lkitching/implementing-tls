@@ -25,6 +25,13 @@ impl BinarySerialisable for u8 {
     }
 }
 
+impl BinarySerialisable for u16 {
+    fn write_to(&self, buf: &mut Vec<u8>) {
+        let bytes = self.to_be_bytes();
+        buf.extend_from_slice(bytes.as_slice());
+    }
+}
+
 #[derive(Debug, PartialEq, Eq, Clone, Copy, TryFromPrimitive)]
 #[repr(u8)]
 enum CompressionMethods {
@@ -260,7 +267,7 @@ impl <T: HandshakeMessage + BinarySerialisable> BinarySerialisable for Handshake
     }
 }
 
-fn send_client_hello<W: Write>(dest: &mut W, params: &TLSParameters) -> Result<(), String> {
+fn send_client_hello<W: Write>(dest: &mut W, params: &TLSParameters) -> io::Result<()> {
     let hello = ClientHello {
         client_version: TLS_VERSION,
         random: Random::from_now(&params.client_random.random_bytes),
@@ -269,16 +276,78 @@ fn send_client_hello<W: Write>(dest: &mut W, params: &TLSParameters) -> Result<(
         cipher_suites: CipherSuites(vec![CipherSuiteIdentifier::TLS_RSA_WITH_3DES_EDE_CBC_SHA])
     };
 
-    Ok(())
+    send_handshake_message(dest, hello)
 }
 
-fn send_handshake_message<W: Write, H: HandshakeMessage + BinarySerialisable>(dest: &mut W, msg: H) -> Result<(), String> {
-    let buf = Handshake(msg).write_to_vec();
+fn send_handshake_message<W: Write, H: HandshakeMessage + BinarySerialisable>(dest: &mut W, handshake_message: H) -> io::Result<()> {
+    let wrapped = Handshake(handshake_message);
+    let buf = wrapped.write_to_vec();
     // TODO: update handshake message digests
 
-    send_message(dest, buf.as_slice())
+    let msg = TLSPlaintext {
+        // TODO: get from TLS parameters?
+        version: TLS_VERSION,
+        message: wrapped
+    };
+
+    send_message(dest, msg)
 }
 
-fn send_message<W: Write>(dest: &mut W, buf: &[u8]) -> Result<(), String> {
-    todo!()
+#[derive(Copy, Clone, Debug, PartialEq, Eq)]
+#[repr(u8)]
+enum ContentType {
+    ChangeCipherSpec = 20,
+    Alert = 21,
+    Handshake = 22,
+    ApplicationData = 23
+}
+
+impl BinarySerialisable for ContentType {
+    fn write_to(&self, buf: &mut Vec<u8>) {
+        (*self as u8).write_to(buf);
+    }
+}
+
+// TODO: Change to (version, type, buf)?
+struct TLSPlaintext<T> {
+    version: ProtocolVersion,
+    message: T,
+}
+
+trait TLSMessage {
+    fn get_content_type(&self) -> ContentType;
+}
+
+impl <T> TLSMessage for Handshake<T> {
+    fn get_content_type(&self) -> ContentType {
+        ContentType::Handshake
+    }
+}
+
+impl <T: TLSMessage + BinarySerialisable> BinarySerialisable for TLSPlaintext<T> {
+    fn write_to(&self, buf: &mut Vec<u8>) {
+        // write content type
+        self.message.get_content_type().write_to(buf);
+
+        // get inner message
+        let tmp = self.message.write_to_vec();
+
+        // write protocol version
+        self.version.write_to(buf);
+
+        // write message length
+        (tmp.len() as u16).write_to(buf);
+
+        // write message
+        buf.extend_from_slice(tmp.as_slice());
+    }
+}
+
+fn send_message<W: Write, T: BinarySerialisable>(dest: &mut W, msg: T) -> io::Result<()> {
+    let buf = msg.write_to_vec();
+
+    // TODO: check entire message was written
+    let result = dest.write(buf.as_slice())?;
+
+    Ok(())
 }
