@@ -2,8 +2,8 @@ use std::io::{self, Write};
 use chrono::{DateTime, Utc};
 use num_enum::{TryFromPrimitive};
 
-trait FixedBinarySize {
-    fn binary_size() -> usize;
+trait FixedBinaryLength {
+    fn fixed_binary_len() -> usize;
 }
 
 trait BinarySerialisable {
@@ -15,8 +15,8 @@ trait BinarySerialisable {
     }
 }
 
-impl FixedBinarySize for u8 {
-    fn binary_size() -> usize { 1 }
+impl FixedBinaryLength for u8 {
+    fn fixed_binary_len() -> usize { 1 }
 }
 
 impl BinarySerialisable for u8 {
@@ -106,8 +106,8 @@ enum CipherSuiteIdentifier {
     TLS_DH_anon_WITH_AES_256_CBC_SHA  = 0x003A,
 }
 
-impl FixedBinarySize for CipherSuiteIdentifier {
-    fn binary_size() -> usize { 2 }
+impl FixedBinaryLength for CipherSuiteIdentifier {
+    fn fixed_binary_len() -> usize { 2 }
 }
 
 impl BinarySerialisable for CipherSuiteIdentifier {
@@ -177,9 +177,9 @@ fn write_elements<T: BinarySerialisable>(buf: &mut Vec<u8>, elems: &[T]) {
     }
 }
 
-impl <T: FixedBinarySize + BinarySerialisable> BinarySerialisable for &[T] {
+impl <T: FixedBinaryLength + BinarySerialisable> BinarySerialisable for &[T] {
     fn write_to(&self, buf: &mut Vec<u8>) {
-        let element_len = self.len() * T::binary_size();
+        let element_len = self.len() * T::fixed_binary_len();
 
         buf.push(element_len as u8);
         write_elements(buf, self);
@@ -189,7 +189,7 @@ impl <T: FixedBinarySize + BinarySerialisable> BinarySerialisable for &[T] {
 impl BinarySerialisable for CipherSuites {
     fn write_to(&self, buf: &mut Vec<u8>) {
         let elems = self.0.as_slice();
-        let element_len = elems.len() * CipherSuiteIdentifier::binary_size();
+        let element_len = elems.len() * CipherSuiteIdentifier::fixed_binary_len();
 
         // write length
         // WARNING: cipher suites length is 2 bytes!
@@ -200,8 +200,8 @@ impl BinarySerialisable for CipherSuites {
     }
 }
 
-impl FixedBinarySize for CompressionMethods {
-    fn binary_size() -> usize { 1 }
+impl FixedBinaryLength for CompressionMethods {
+    fn fixed_binary_len() -> usize { 1 }
 }
 
 impl BinarySerialisable for CompressionMethods {
