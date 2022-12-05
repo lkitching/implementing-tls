@@ -1,4 +1,6 @@
 use std::io::{self, Write};
+use std::convert::{TryFrom};
+use std::fmt::{Debug};
 use chrono::{DateTime, Utc};
 use num_enum::{TryFromPrimitive};
 
@@ -17,10 +19,10 @@ impl <T: FixedBinaryLength> BinaryLength for T {
 }
 
 trait BinarySerialisable : BinaryLength {
-    fn write_to(&self, buf: &mut Vec<u8>);
+    fn write_to(&self, buf: &mut [u8]);
     fn write_to_vec(&self) -> Vec<u8> {
-        let mut v = Vec::new();
-        self.write_to(&mut v);
+        let mut v = vec![0; self.binary_len()];
+        self.write_to(v.as_mut_slice());
         v
     }
 }
@@ -30,8 +32,8 @@ impl FixedBinaryLength for u8 {
 }
 
 impl BinarySerialisable for u8 {
-    fn write_to(&self, buf: &mut Vec<u8>) {
-        buf.push(*self);
+    fn write_to(&self, buf: &mut [u8]) {
+        buf[0] = *self;
     }
 }
 
@@ -40,9 +42,9 @@ impl FixedBinaryLength for u16 {
 }
 
 impl BinarySerialisable for u16 {
-    fn write_to(&self, buf: &mut Vec<u8>) {
+    fn write_to(&self, buf: &mut [u8]) {
         let bytes = self.to_be_bytes();
-        buf.extend_from_slice(bytes.as_slice());
+        buf.copy_from_slice(bytes.as_slice());
     }
 }
 
@@ -121,13 +123,13 @@ enum CipherSuiteIdentifier {
 }
 
 impl FixedBinaryLength for CipherSuiteIdentifier {
-    fn fixed_binary_len() -> usize { 2 }
+    fn fixed_binary_len() -> usize { u16::fixed_binary_len() }
 }
 
 impl BinarySerialisable for CipherSuiteIdentifier {
-    fn write_to(&self, buf: &mut Vec<u8>) {
+    fn write_to(&self, buf: &mut [u8]) {
         let s = *self as u16;
-        buf.extend_from_slice(s.to_be_bytes().as_slice())
+        s.write_to(buf);
     }
 }
 
@@ -142,9 +144,9 @@ impl FixedBinaryLength for ProtocolVersion {
 }
 
 impl BinarySerialisable for ProtocolVersion {
-    fn write_to(&self, buf: &mut Vec<u8>) {
-        buf.push(self.major);
-        buf.push(self.minor);
+    fn write_to(&self, buf: &mut [u8]) {
+        buf[0] = self.major;
+        buf[1] = self.minor;
     }
 }
 
@@ -160,9 +162,9 @@ impl FixedBinaryLength for Random {
 }
 
 impl BinarySerialisable for Random {
-    fn write_to(&self, buf: &mut Vec<u8>) {
-        buf.extend_from_slice(self.gmt_unix_time.to_be_bytes().as_slice());
-        buf.extend_from_slice(self.random_bytes.as_slice());
+    fn write_to(&self, buf: &mut [u8]) {
+        buf[0..4].copy_from_slice(self.gmt_unix_time.to_be_bytes().as_slice());
+        buf[4..].copy_from_slice(self.random_bytes.as_slice());
     }
 }
 
@@ -193,66 +195,69 @@ impl BinaryLength for ClientHello {
     }
 }
 
+fn write_front<'a, T: BinarySerialisable>(msg: &T, buf: &'a mut [u8]) -> &'a mut [u8] {
+    let (msg_buf, rest) = buf.split_at_mut(msg.binary_len());
+    msg.write_to(msg_buf);
+    rest
+}
+
 impl BinarySerialisable for ClientHello {
-    fn write_to(&self, writer: &mut Vec<u8>) {
-        self.client_version.write_to(writer);
-        self.random.write_to(writer);
-        self.session_id.as_slice().write_to(writer);
-        self.cipher_suites.write_to(writer);
-        self.compression_methods.as_slice().write_to(writer);
+    fn write_to(&self, buf: &mut [u8]) {
+        let buf = write_front(&self.client_version, buf);
+        let buf = write_front(&self.random, buf);
+        let buf = write_front(&self.session_id.as_slice(), buf);
+        let buf = write_front(&self.cipher_suites, buf);
+        self.compression_methods.as_slice().write_to(buf);
     }
 }
 
-fn write_elements<T: BinarySerialisable>(buf: &mut Vec<u8>, elems: &[T]) {
+fn write_elements<L, T>(buf: &mut [u8], elems: &[T])
+    where L: TryFrom<usize> + BinarySerialisable,
+          <L as TryFrom<usize>>::Error : Debug,
+          T: BinarySerialisable
+{
+    let len = L::try_from(elems.len()).expect("Length too large for length type");
+    let mut buf = write_front(&len, buf);
+
     for e in elems.iter() {
-        e.write_to(buf);
+        buf = write_front(e, buf);
     }
 }
 
 impl <T: FixedBinaryLength> BinaryLength for &[T] {
     fn binary_len(&self) -> usize {
         // length is a single byte
-        (self.len() * T::fixed_binary_len()) + 1
+        (self.len() * T::fixed_binary_len()) + u8::fixed_binary_len()
     }
 }
 
 impl <T: FixedBinaryLength + BinarySerialisable> BinarySerialisable for &[T] {
-    fn write_to(&self, buf: &mut Vec<u8>) {
-        let element_len = self.len() * T::fixed_binary_len();
-
-        buf.push(element_len as u8);
-        write_elements(buf, self);
+    fn write_to(&self, buf: &mut [u8]) {
+        write_elements::<u8, T>(buf, self);
     }
 }
 
 impl BinaryLength for CipherSuites {
     fn binary_len(&self) -> usize {
         // WARNING: cipher suites length is 2 bytes!
-        (self.0.len() * CipherSuiteIdentifier::fixed_binary_len()) + 2
+        (self.0.len() * CipherSuiteIdentifier::fixed_binary_len()) + u16::fixed_binary_len()
     }
 }
 
 impl BinarySerialisable for CipherSuites {
-    fn write_to(&self, buf: &mut Vec<u8>) {
+    fn write_to(&self, buf: &mut [u8]) {
         let elems = self.0.as_slice();
-        let element_len = elems.len() * CipherSuiteIdentifier::fixed_binary_len();
-
-        // write length
-        // WARNING: cipher suites length is 2 bytes!
-        buf.extend_from_slice((element_len as u16).to_be_bytes().as_slice());
-
-        // write elements
-        write_elements(buf, elems);
+        write_elements::<u16, _>(buf, elems);
     }
 }
 
 impl FixedBinaryLength for CompressionMethods {
-    fn fixed_binary_len() -> usize { 1 }
+    fn fixed_binary_len() -> usize { u8::fixed_binary_len() }
 }
 
 impl BinarySerialisable for CompressionMethods {
-    fn write_to(&self, buf: &mut Vec<u8>) {
-        buf.push(*self as u8);
+    fn write_to(&self, buf: &mut [u8]) {
+        buf[0] = *self as u8;
     }
 }
 
@@ -277,12 +282,12 @@ enum HandshakeType {
 }
 
 impl FixedBinaryLength for HandshakeType {
-    fn fixed_binary_len() -> usize { 1 }
+    fn fixed_binary_len() -> usize { u8::fixed_binary_len() }
 }
 
 impl BinarySerialisable for HandshakeType {
-    fn write_to(&self, buf: &mut Vec<u8>) {
-        (*self as u8).write_to(buf);
+    fn write_to(&self, buf: &mut [u8]) {
+        buf[0] = *self as u8;
     }
 }
 
@@ -302,26 +307,25 @@ impl <T: BinaryLength> BinaryLength for Handshake<T> {
     fn binary_len(&self) -> usize {
         // 1 byte for message type
         // 3 bytes for inner message length
-        self.0.binary_len() + 4
+        self.0.binary_len() + HandshakeType::fixed_binary_len() + 3
     }
 }
 
 impl <T: HandshakeMessage + BinarySerialisable> BinarySerialisable for Handshake<T> {
-    fn write_to(&self, buf: &mut Vec<u8>) {
+    fn write_to(&self, buf: &mut [u8]) {
         let msg = &self.0;
-        let tmp = msg.write_to_vec();
 
         // write message type
-        msg.handshake_message_type().write_to(buf);
+        let buf = write_front(&msg.handshake_message_type(), buf);
 
         // write inner message length
         // message length field is 3 bytes (24 bits)
         // TODO: validate message length fits? Should always be enough!
-        let len_bytes = tmp.len().to_be_bytes();
-        buf.extend_from_slice(&len_bytes[(len_bytes.len() - 3) ..]);
+        let len_bytes = msg.binary_len().to_be_bytes();
+        buf[0..3].copy_from_slice(&len_bytes[(len_bytes.len() - 3) ..]);
 
         // write inner message
-        buf.extend_from_slice(tmp.as_slice());
+        msg.write_to(&mut buf[3..]);
     }
 }
 
@@ -365,7 +369,7 @@ impl FixedBinaryLength for ContentType {
 }
 
 impl BinarySerialisable for ContentType {
-    fn write_to(&self, buf: &mut Vec<u8>) {
+    fn write_to(&self, buf: &mut [u8]) {
         (*self as u8).write_to(buf);
     }
 }
@@ -396,21 +400,21 @@ impl <T: BinaryLength> BinaryLength for TLSPlaintext<T> {
 }
 
 impl <T: TLSMessage + BinarySerialisable> BinarySerialisable for TLSPlaintext<T> {
-    fn write_to(&self, buf: &mut Vec<u8>) {
+    fn write_to(&self, buf: &mut [u8]) {
         // write content type
-        self.message.get_content_type().write_to(buf);
+        let buf = write_front(&self.message.get_content_type(), buf);
 
         // get inner message
-        let tmp = self.message.write_to_vec();
+        //let tmp = self.message.write_to_vec();
 
         // write protocol version
-        self.version.write_to(buf);
+        let buf = write_front(&self.version, buf);
 
         // write message length
-        (tmp.len() as u16).write_to(buf);
+        let buf = write_front(&(self.message.binary_len() as u16), buf);
 
         // write message
-        buf.extend_from_slice(tmp.as_slice());
+        self.message.write_to(buf);
     }
 }
 
