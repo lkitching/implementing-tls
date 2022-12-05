@@ -2,11 +2,21 @@ use std::io::{self, Write};
 use chrono::{DateTime, Utc};
 use num_enum::{TryFromPrimitive};
 
+trait BinaryLength {
+    fn binary_len(&self) -> usize;
+}
+
 trait FixedBinaryLength {
     fn fixed_binary_len() -> usize;
 }
 
-trait BinarySerialisable {
+impl <T: FixedBinaryLength> BinaryLength for T {
+    fn binary_len(&self) -> usize {
+        T::fixed_binary_len()
+    }
+}
+
+trait BinarySerialisable : BinaryLength {
     fn write_to(&self, buf: &mut Vec<u8>);
     fn write_to_vec(&self) -> Vec<u8> {
         let mut v = Vec::new();
@@ -23,6 +33,10 @@ impl BinarySerialisable for u8 {
     fn write_to(&self, buf: &mut Vec<u8>) {
         buf.push(*self);
     }
+}
+
+impl FixedBinaryLength for u16 {
+    fn fixed_binary_len() -> usize { 2 }
 }
 
 impl BinarySerialisable for u16 {
@@ -123,6 +137,10 @@ struct ProtocolVersion {
     minor: u8
 }
 
+impl FixedBinaryLength for ProtocolVersion {
+    fn fixed_binary_len() -> usize { 2 }
+}
+
 impl BinarySerialisable for ProtocolVersion {
     fn write_to(&self, buf: &mut Vec<u8>) {
         buf.push(self.major);
@@ -135,6 +153,10 @@ const TLS_VERSION: ProtocolVersion = ProtocolVersion { major: 3, minor: 1 };
 struct Random {
     gmt_unix_time: u32,
     random_bytes: [u8; 28]
+}
+
+impl FixedBinaryLength for Random {
+    fn fixed_binary_len() -> usize { 32 }
 }
 
 impl BinarySerialisable for Random {
@@ -161,6 +183,16 @@ struct ClientHello {
     compression_methods: Vec<CompressionMethods>,
 }
 
+impl BinaryLength for ClientHello {
+    fn binary_len(&self) -> usize {
+        ProtocolVersion::fixed_binary_len() +
+            Random::fixed_binary_len() +
+            self.session_id.as_slice().binary_len() +
+            self.cipher_suites.binary_len() +
+            self.compression_methods.as_slice().binary_len()
+    }
+}
+
 impl BinarySerialisable for ClientHello {
     fn write_to(&self, writer: &mut Vec<u8>) {
         self.client_version.write_to(writer);
@@ -177,12 +209,26 @@ fn write_elements<T: BinarySerialisable>(buf: &mut Vec<u8>, elems: &[T]) {
     }
 }
 
+impl <T: FixedBinaryLength> BinaryLength for &[T] {
+    fn binary_len(&self) -> usize {
+        // length is a single byte
+        (self.len() * T::fixed_binary_len()) + 1
+    }
+}
+
 impl <T: FixedBinaryLength + BinarySerialisable> BinarySerialisable for &[T] {
     fn write_to(&self, buf: &mut Vec<u8>) {
         let element_len = self.len() * T::fixed_binary_len();
 
         buf.push(element_len as u8);
         write_elements(buf, self);
+    }
+}
+
+impl BinaryLength for CipherSuites {
+    fn binary_len(&self) -> usize {
+        // WARNING: cipher suites length is 2 bytes!
+        (self.0.len() * CipherSuiteIdentifier::fixed_binary_len()) + 2
     }
 }
 
@@ -230,6 +276,10 @@ enum HandshakeType {
     FINISHED = 20
 }
 
+impl FixedBinaryLength for HandshakeType {
+    fn fixed_binary_len() -> usize { 1 }
+}
+
 impl BinarySerialisable for HandshakeType {
     fn write_to(&self, buf: &mut Vec<u8>) {
         (*self as u8).write_to(buf);
@@ -247,6 +297,14 @@ impl HandshakeMessage for ClientHello {
 }
 
 struct Handshake<T>(T);
+
+impl <T: BinaryLength> BinaryLength for Handshake<T> {
+    fn binary_len(&self) -> usize {
+        // 1 byte for message type
+        // 3 bytes for inner message length
+        self.0.binary_len() + 4
+    }
+}
 
 impl <T: HandshakeMessage + BinarySerialisable> BinarySerialisable for Handshake<T> {
     fn write_to(&self, buf: &mut Vec<u8>) {
@@ -302,6 +360,10 @@ enum ContentType {
     ApplicationData = 23
 }
 
+impl FixedBinaryLength for ContentType {
+    fn fixed_binary_len() -> usize { u8::fixed_binary_len() }
+}
+
 impl BinarySerialisable for ContentType {
     fn write_to(&self, buf: &mut Vec<u8>) {
         (*self as u8).write_to(buf);
@@ -321,6 +383,15 @@ trait TLSMessage {
 impl <T> TLSMessage for Handshake<T> {
     fn get_content_type(&self) -> ContentType {
         ContentType::Handshake
+    }
+}
+
+impl <T: BinaryLength> BinaryLength for TLSPlaintext<T> {
+    fn binary_len(&self) -> usize {
+        // 1 byte for message type
+        // 2 bytes for protocol version
+        // 2 bytes for length
+        ContentType::fixed_binary_len() + ProtocolVersion::fixed_binary_len() + 2 + self.message.binary_len()
     }
 }
 
