@@ -31,11 +31,20 @@ trait BinarySerialisable : BinaryLength {
 // TODO: merge with BinarySerialisable?
 enum BinaryReadError {
     ValueOutOfRange,
-    BufferSize
+    BufferTooSmall,
+    BufferTooLarge
 }
 
 trait BinaryReadable {
     fn read_from(buf: &[u8]) -> Result<(Self, &[u8]), BinaryReadError> where Self: Sized;
+    fn read_all_from(buf: &[u8]) -> Result<Self, BinaryReadError> where Self: Sized {
+        let (result, remaining) = Self::read_from(buf)?;
+        if remaining.is_empty() {
+            Ok(result)
+        } else {
+            Err(BinaryReadError::BufferTooLarge)
+        }
+    }
 }
 
 impl FixedBinaryLength for u8 {
@@ -45,6 +54,16 @@ impl FixedBinaryLength for u8 {
 impl BinarySerialisable for u8 {
     fn write_to(&self, buf: &mut [u8]) {
         buf[0] = *self;
+    }
+}
+
+impl BinaryReadable for u8 {
+    fn read_from(buf: &[u8]) -> Result<(Self, &[u8]), BinaryReadError> where Self: Sized {
+        if buf.len() < 1 {
+            Err(BinaryReadError::BufferTooSmall)
+        } else {
+            Ok((buf[0], &buf[1..]))
+        }
     }
 }
 
@@ -62,7 +81,7 @@ impl BinarySerialisable for u16 {
 
 impl BinaryReadable for u16 {
     fn read_from(buf: &[u8]) -> Result<(Self, &[u8]), BinaryReadError> where Self: Sized {
-        let bytes: [u8; 2] = buf.try_into().map_err(|_| BinaryReadError::BufferSize)?;
+        let bytes: [u8; 2] = buf.try_into().map_err(|_| BinaryReadError::BufferTooSmall)?;
         let value = u16::from_be_bytes(bytes);
         Ok((value, &buf[2..]))
     }
@@ -162,7 +181,7 @@ struct ProtocolVersion {
 impl BinaryReadable for ProtocolVersion {
     fn read_from(buf: &[u8]) -> Result<(ProtocolVersion, &[u8]), BinaryReadError> {
         if buf.len() < 2 {
-            Err(BinaryReadError::BufferSize)
+            Err(BinaryReadError::BufferTooSmall)
         } else {
             let version = ProtocolVersion {
                 major: buf[0],
@@ -331,6 +350,14 @@ impl BinarySerialisable for HandshakeType {
     }
 }
 
+impl BinaryReadable for HandshakeType {
+    fn read_from(buf: &[u8]) -> Result<(Self, &[u8]), BinaryReadError> where Self: Sized {
+        let (byte, buf) = u8::read_from(buf)?;
+        let handshake_type = HandshakeType::try_from(byte).map_err(|_| BinaryReadError::ValueOutOfRange)?;
+        Ok((handshake_type, buf))
+    }
+}
+
 trait HandshakeMessage {
     fn handshake_message_type(&self) -> HandshakeType;
 }
@@ -338,6 +365,45 @@ trait HandshakeMessage {
 impl HandshakeMessage for ClientHello {
     fn handshake_message_type(&self) -> HandshakeType {
         HandshakeType::CLIENT_HELLO
+    }
+}
+
+// represents the length field in a Handshake message header
+// its binary representation is 3 bytes
+struct HandshakeLength(u32);
+
+impl TryFrom<usize> for HandshakeLength {
+    type Error = ();
+
+    fn try_from(value: usize) -> Result<Self, Self::Error> {
+        if value > 0xFFFFFFusize {
+            Err(())
+        } else {
+            Ok(HandshakeLength(value as u32))
+        }
+    }
+}
+impl FixedBinaryLength for HandshakeLength {
+    fn fixed_binary_len() -> usize { 3 }
+}
+
+impl BinarySerialisable for HandshakeLength {
+    fn write_to(&self, buf: &mut [u8]) {
+        let len_bytes = self.0.to_be_bytes();
+        buf[0..3].copy_from_slice(&len_bytes[1..]);
+    }
+}
+
+impl BinaryReadable for HandshakeLength {
+    fn read_from(buf: &[u8]) -> Result<(Self, &[u8]), BinaryReadError> where Self: Sized {
+        if buf.len() < 3 {
+            Err(BinaryReadError::BufferTooSmall)
+        } else {
+            let mut be_bytes: [u8; 4] = [0, 0, 0, 0];
+            be_bytes[1..].copy_from_slice(&buf[0..3]);
+            let value = u32::from_be_bytes(be_bytes);
+            Ok((HandshakeLength(value), &buf[3..]))
+        }
     }
 }
 
@@ -361,8 +427,8 @@ impl <T: HandshakeMessage + BinarySerialisable> BinarySerialisable for Handshake
         // write inner message length
         // message length field is 3 bytes (24 bits)
         // TODO: validate message length fits? Should always be enough!
-        let len_bytes = msg.binary_len().to_be_bytes();
-        buf[0..3].copy_from_slice(&len_bytes[(len_bytes.len() - 3) ..]);
+        let len = HandshakeLength::try_from(msg.binary_len()).expect("Message too large");
+        let buf = write_front(&len, buf);
 
         // write inner message
         msg.write_to(&mut buf[3..]);
@@ -490,7 +556,7 @@ impl BinarySerialisable for ContentType {
 impl BinaryReadable for ContentType {
     fn read_from(buf: &[u8]) -> Result<(Self, &[u8]), BinaryReadError> where Self: Sized {
         if buf.len() < 1 {
-            Err(BinaryReadError::BufferSize)
+            Err(BinaryReadError::BufferTooSmall)
         } else {
             let message_type = ContentType::try_from(buf[0]).map_err(|_| BinaryReadError::ValueOutOfRange)?;
             Ok((message_type, &buf[1..]))
@@ -611,17 +677,53 @@ enum TLSError {
     UnknownMessage
 }
 
-struct ServerHello {}
+struct SessionId(Vec<u8>);
+
+struct ServerHello {
+    server_version: ProtocolVersion,
+    random: Random,
+    session_id: SessionId,
+    cipher_suite: CipherSuiteIdentifier,
+    compression_method: CompressionMethods
+}
+
+impl BinaryReadable for ServerHello {
+    fn read_from(buf: &[u8]) -> Result<(Self, &[u8]), BinaryReadError> where Self: Sized {
+        todo!()
+    }
+}
 
 enum ServerMessage {
     Hello(ServerHello)
 }
 
+struct HandshakeHeader {
+    handshake_type: HandshakeType,
+    length: HandshakeLength
+}
+
+impl BinaryReadable for HandshakeHeader {
+    fn read_from(buf: &[u8]) -> Result<(Self, &[u8]), BinaryReadError> where Self: Sized {
+        let (handshake_type, buf) = HandshakeType::read_from(buf)?;
+        let (length, buf) = HandshakeLength::read_from(buf)?;
+        Ok((HandshakeHeader { handshake_type, length }, buf))
+    }
+}
+
 fn parse_server_message(header: &TLSHeader, buf: Vec<u8>) -> Result<ServerMessage, TLSError> {
     if header.message_type == ContentType::Handshake {
-
+        // TODO: create type for raw handshake message?
+        let (handshake_header, buf) = HandshakeHeader::read_from(buf.as_slice()).map_err(TLSError::ParseError)?;
+        if handshake_header.handshake_type == HandshakeType::SERVER_HELLO {
+            ServerHello::read_all_from(buf)
+                .map(ServerMessage::Hello)
+                .map_err(TLSError::ParseError)
+        } else {
+            Err(TLSError::UnknownMessage)
+        }
+    } else {
+        Err(TLSError::UnknownMessage)
     }
-    todo!()
 }
 
 fn receive_tls_msg(conn: &mut TcpStream) -> Result<ServerMessage, TLSError> {
