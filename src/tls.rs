@@ -1,8 +1,9 @@
-use std::io::{self, Write};
-use std::convert::{TryFrom};
+use std::io::{self, Read, Write, ErrorKind};
+use std::convert::{TryFrom, TryInto};
 use std::fmt::{Debug};
 use chrono::{DateTime, Utc};
 use num_enum::{TryFromPrimitive};
+use std::net::{TcpStream};
 
 trait BinaryLength {
     fn binary_len(&self) -> usize;
@@ -44,6 +45,7 @@ impl FixedBinaryLength for u16 {
 impl BinarySerialisable for u16 {
     fn write_to(&self, buf: &mut [u8]) {
         let bytes = self.to_be_bytes();
+
         buf.copy_from_slice(bytes.as_slice());
     }
 }
@@ -265,6 +267,12 @@ struct TLSParameters {
     client_random: Random
 }
 
+impl TLSParameters {
+    fn init(&mut self) {
+        todo!()
+    }
+}
+
 #[derive(Debug, PartialEq, Eq, Clone, Copy, TryFromPrimitive)]
 #[repr(u8)]
 #[allow(non_camel_case_types)]
@@ -364,6 +372,79 @@ enum ContentType {
     ApplicationData = 23
 }
 
+#[derive(Copy, Clone, Debug, PartialEq, Eq)]
+#[repr(u8)]
+enum AlertLevel {
+    Warning = 1,
+    Fatal = 2
+}
+
+#[derive(Copy, Clone, Debug, PartialEq, Eq)]
+#[repr(u8)]
+enum AlertDescription {
+    CloseNotify = 0,
+    UnexpectedMessage = 10,
+    BadRecordMAC = 20,
+    DecryptionFailed = 21,
+    RecordOverflow = 22,
+    DecompressionFailure = 30,
+    HandshakeFailure = 40,
+    BadCertificate = 42,
+    UnsupportedCertificate = 43,
+    CertificateRevoked = 44,
+    CertificateExpired = 45,
+    CertificateUnknown = 46,
+    IllegalParameter = 47,
+    UnknownCA = 48,
+    AccessDenied = 49,
+    DecodeError = 50,
+    DecryptError = 51,
+    ExportRestriction = 60,
+    ProtocolVersion = 70,
+    InsufficientSecurity = 71,
+    InternalError = 80,
+    UserCancelled = 90,
+    NoRenegotiation = 100
+}
+
+struct Alert {
+    level: AlertLevel,
+    description: AlertDescription
+}
+
+impl FixedBinaryLength for AlertLevel {
+    fn fixed_binary_len() -> usize { u8::fixed_binary_len() }
+}
+
+impl FixedBinaryLength for AlertDescription {
+    fn fixed_binary_len() -> usize { u8::fixed_binary_len() }
+}
+
+impl BinarySerialisable for AlertLevel {
+    fn write_to(&self, buf: &mut [u8]) {
+        (*self as u8).write_to(buf);
+    }
+}
+
+impl BinarySerialisable for AlertDescription {
+    fn write_to(&self, buf: &mut [u8]) {
+        (*self as u8).write_to(buf)
+    }
+}
+
+impl BinarySerialisable for Alert {
+    fn write_to(&self, buf: &mut [u8]) {
+        let buf = write_front(&self.level, buf);
+        self.description.write_to(buf);
+    }
+}
+
+impl FixedBinaryLength for Alert {
+    fn fixed_binary_len() -> usize {
+        AlertLevel::fixed_binary_len() + AlertDescription::fixed_binary_len()
+    }
+}
+
 impl FixedBinaryLength for ContentType {
     fn fixed_binary_len() -> usize { u8::fixed_binary_len() }
 }
@@ -387,6 +468,12 @@ trait TLSMessage {
 impl <T> TLSMessage for Handshake<T> {
     fn get_content_type(&self) -> ContentType {
         ContentType::Handshake
+    }
+}
+
+impl TLSMessage for Alert {
+    fn get_content_type(&self) -> ContentType {
+        ContentType::Alert
     }
 }
 
@@ -425,4 +512,92 @@ fn send_message<W: Write, T: BinarySerialisable>(dest: &mut W, msg: T) -> io::Re
     let result = dest.write(buf.as_slice())?;
 
     Ok(())
+}
+
+fn read_exact<R: Read>(source: &mut R, bytes: usize) -> io::Result<Vec<u8>> {
+    let mut dest = vec![0; bytes];
+    let mut offset = 0;
+
+    while offset < bytes {
+        let bytes_read = source.read(&mut dest[offset..])?;
+        if bytes_read == 0 {
+            // EOF
+            return Err(io::Error::new(ErrorKind::UnexpectedEof, "Failed to read requested number of bytes: EOF"));
+        }
+        offset += bytes_read
+    }
+    Ok(dest)
+}
+
+struct TLSHeader {
+    length: u16
+}
+
+impl TLSHeader {
+    fn new(bytes: Vec<u8>) -> Self {
+        assert_eq!(bytes.len(), 5);
+        // TODO: parse message type and version
+        let len_bytes: [u8; 2] = bytes[3..].try_into().unwrap();
+        TLSHeader {
+            length: u16::from_be_bytes(len_bytes)
+        }
+    }
+}
+
+
+fn send_alert_message<W: Write>(dest: &mut W, code: AlertDescription) -> io::Result<()> {
+    let alert = Alert { level: AlertLevel::Fatal, description: code };
+    let message = TLSPlaintext {
+        version: TLS_VERSION,
+        message: alert
+    };
+    send_message(dest, message)
+}
+
+enum TLSError {
+    IOError(io::Error),
+    UnknownMessage
+}
+
+struct ServerHello {}
+
+enum ServerMessage {
+    Hello(ServerHello)
+}
+
+fn parse_server_message(buf: Vec<u8>) -> Result<ServerMessage, TLSError> {
+    todo!()
+}
+
+fn receive_tls_msg(conn: &mut TcpStream) -> Result<ServerMessage, TLSError> {
+    // read TLS Record header
+    let header_buf = read_exact(conn, 5).map_err(TLSError::IOError)?;
+    let tls_header = TLSHeader::new(header_buf);
+
+    // read message body
+    match read_exact(conn, tls_header.length as usize) {
+        Ok(message_buf) => {
+           parse_server_message(message_buf)
+        },
+        Err(_) => {
+            send_alert_message(conn, AlertDescription::IllegalParameter);
+            // TODO: Add 'state' Error type and remove IOError?
+            let ioe = io::Error::new(ErrorKind::UnexpectedEof, "Failed to read message body");
+            return Err(TLSError::IOError(ioe));
+        }
+    }
+}
+
+// TODO: can change TcpStream to Read?
+fn tls_connect(conn: &mut TcpStream, tls_params: &mut TLSParameters) -> io::Result<()> {
+    tls_params.init();
+
+    // step 1
+    // send the TLS handshake 'client hello' message
+    send_client_hello(conn, &tls_params)?;
+
+    // step 2
+    // receive the server hello response
+
+    todo!()
 }
