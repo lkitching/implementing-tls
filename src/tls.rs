@@ -28,6 +28,16 @@ trait BinarySerialisable : BinaryLength {
     }
 }
 
+// TODO: merge with BinarySerialisable?
+enum BinaryReadError {
+    ValueOutOfRange,
+    BufferSize
+}
+
+trait BinaryReadable {
+    fn read_from(buf: &[u8]) -> Result<(Self, &[u8]), BinaryReadError> where Self: Sized;
+}
+
 impl FixedBinaryLength for u8 {
     fn fixed_binary_len() -> usize { 1 }
 }
@@ -47,6 +57,14 @@ impl BinarySerialisable for u16 {
         let bytes = self.to_be_bytes();
 
         buf.copy_from_slice(bytes.as_slice());
+    }
+}
+
+impl BinaryReadable for u16 {
+    fn read_from(buf: &[u8]) -> Result<(Self, &[u8]), BinaryReadError> where Self: Sized {
+        let bytes: [u8; 2] = buf.try_into().map_err(|_| BinaryReadError::BufferSize)?;
+        let value = u16::from_be_bytes(bytes);
+        Ok((value, &buf[2..]))
     }
 }
 
@@ -139,6 +157,20 @@ impl BinarySerialisable for CipherSuiteIdentifier {
 struct ProtocolVersion {
     major: u8,
     minor: u8
+}
+
+impl BinaryReadable for ProtocolVersion {
+    fn read_from(buf: &[u8]) -> Result<(ProtocolVersion, &[u8]), BinaryReadError> {
+        if buf.len() < 2 {
+            Err(BinaryReadError::BufferSize)
+        } else {
+            let version = ProtocolVersion {
+                major: buf[0],
+                minor: buf[1]
+            };
+            Ok((version, &buf[2..]))
+        }
+    }
 }
 
 impl FixedBinaryLength for ProtocolVersion {
@@ -363,7 +395,7 @@ fn send_handshake_message<W: Write, H: HandshakeMessage + BinarySerialisable>(de
     send_message(dest, msg)
 }
 
-#[derive(Copy, Clone, Debug, PartialEq, Eq)]
+#[derive(Copy, Clone, Debug, PartialEq, Eq, TryFromPrimitive)]
 #[repr(u8)]
 enum ContentType {
     ChangeCipherSpec = 20,
@@ -372,14 +404,14 @@ enum ContentType {
     ApplicationData = 23
 }
 
-#[derive(Copy, Clone, Debug, PartialEq, Eq)]
+#[derive(Copy, Clone, Debug, PartialEq, Eq, TryFromPrimitive)]
 #[repr(u8)]
 enum AlertLevel {
     Warning = 1,
     Fatal = 2
 }
 
-#[derive(Copy, Clone, Debug, PartialEq, Eq)]
+#[derive(Copy, Clone, Debug, PartialEq, Eq, TryFromPrimitive)]
 #[repr(u8)]
 enum AlertDescription {
     CloseNotify = 0,
@@ -452,6 +484,17 @@ impl FixedBinaryLength for ContentType {
 impl BinarySerialisable for ContentType {
     fn write_to(&self, buf: &mut [u8]) {
         (*self as u8).write_to(buf);
+    }
+}
+
+impl BinaryReadable for ContentType {
+    fn read_from(buf: &[u8]) -> Result<(Self, &[u8]), BinaryReadError> where Self: Sized {
+        if buf.len() < 1 {
+            Err(BinaryReadError::BufferSize)
+        } else {
+            let message_type = ContentType::try_from(buf[0]).map_err(|_| BinaryReadError::ValueOutOfRange)?;
+            Ok((message_type, &buf[1..]))
+        }
     }
 }
 
@@ -530,20 +573,28 @@ fn read_exact<R: Read>(source: &mut R, bytes: usize) -> io::Result<Vec<u8>> {
 }
 
 struct TLSHeader {
+    message_type: ContentType,
+    version: ProtocolVersion,
     length: u16
 }
 
-impl TLSHeader {
-    fn new(bytes: Vec<u8>) -> Self {
-        assert_eq!(bytes.len(), 5);
-        // TODO: parse message type and version
-        let len_bytes: [u8; 2] = bytes[3..].try_into().unwrap();
-        TLSHeader {
-            length: u16::from_be_bytes(len_bytes)
-        }
+impl FixedBinaryLength for TLSHeader {
+    fn fixed_binary_len() -> usize {
+        ContentType::fixed_binary_len() + ProtocolVersion::fixed_binary_len() + u16::fixed_binary_len()
     }
 }
 
+impl BinaryReadable for TLSHeader {
+    fn read_from(buf: &[u8]) -> Result<(Self, &[u8]), BinaryReadError> where Self: Sized {
+        let (message_type, buf) = ContentType::read_from(buf)?;
+        let (version, buf) = ProtocolVersion::read_from(buf)?;
+        let (length, buf) = u16::read_from(buf)?;
+        let header = TLSHeader {
+            message_type, version, length
+        };
+        Ok((header, buf))
+    }
+}
 
 fn send_alert_message<W: Write>(dest: &mut W, code: AlertDescription) -> io::Result<()> {
     let alert = Alert { level: AlertLevel::Fatal, description: code };
@@ -556,6 +607,7 @@ fn send_alert_message<W: Write>(dest: &mut W, code: AlertDescription) -> io::Res
 
 enum TLSError {
     IOError(io::Error),
+    ParseError(BinaryReadError),
     UnknownMessage
 }
 
@@ -565,19 +617,22 @@ enum ServerMessage {
     Hello(ServerHello)
 }
 
-fn parse_server_message(buf: Vec<u8>) -> Result<ServerMessage, TLSError> {
+fn parse_server_message(header: &TLSHeader, buf: Vec<u8>) -> Result<ServerMessage, TLSError> {
+    if header.message_type == ContentType::Handshake {
+
+    }
     todo!()
 }
 
 fn receive_tls_msg(conn: &mut TcpStream) -> Result<ServerMessage, TLSError> {
     // read TLS Record header
-    let header_buf = read_exact(conn, 5).map_err(TLSError::IOError)?;
-    let tls_header = TLSHeader::new(header_buf);
+    let header_buf = read_exact(conn, TLSHeader::fixed_binary_len()).map_err(TLSError::IOError)?;
+    let (tls_header, _) = TLSHeader::read_from(header_buf.as_slice()).map_err(TLSError::ParseError)?;
 
     // read message body
     match read_exact(conn, tls_header.length as usize) {
         Ok(message_buf) => {
-           parse_server_message(message_buf)
+           parse_server_message(&tls_header, message_buf)
         },
         Err(_) => {
             send_alert_message(conn, AlertDescription::IllegalParameter);
