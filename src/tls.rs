@@ -172,6 +172,20 @@ impl BinarySerialisable for CipherSuiteIdentifier {
     }
 }
 
+fn read_into<T, U>(buf: &[u8]) -> Result<(U, &[u8]), BinaryReadError>
+    where T: BinaryReadable,
+          U: TryFrom<T> {
+    let (t, buf) = T::read_from(buf)?;
+    let u = U::try_from(t).map_err(|_| BinaryReadError::ValueOutOfRange)?;
+    Ok((u, buf))
+}
+
+impl BinaryReadable for CipherSuiteIdentifier {
+    fn read_from(buf: &[u8]) -> Result<(Self, &[u8]), BinaryReadError> where Self: Sized {
+        read_into::<u16, CipherSuiteIdentifier>(buf)
+    }
+}
+
 #[derive(Copy, Clone, PartialEq, Eq, Debug)]
 struct ProtocolVersion {
     major: u8,
@@ -206,8 +220,7 @@ impl BinarySerialisable for ProtocolVersion {
 const TLS_VERSION: ProtocolVersion = ProtocolVersion { major: 3, minor: 1 };
 
 struct Random {
-    gmt_unix_time: u32,
-    random_bytes: [u8; 28]
+    bytes: [u8; 32]
 }
 
 impl FixedBinaryLength for Random {
@@ -216,15 +229,30 @@ impl FixedBinaryLength for Random {
 
 impl BinarySerialisable for Random {
     fn write_to(&self, buf: &mut [u8]) {
-        buf[0..4].copy_from_slice(self.gmt_unix_time.to_be_bytes().as_slice());
-        buf[4..].copy_from_slice(self.random_bytes.as_slice());
+        buf.copy_from_slice(self.bytes.as_slice());
+    }
+}
+
+impl BinaryReadable for Random {
+    fn read_from(buf: &[u8]) -> Result<(Self, &[u8]), BinaryReadError> where Self: Sized {
+        let (bytes, buf) = read_slice(buf, 32)?;
+        let r = Random { bytes: bytes.try_into().unwrap() };
+        Ok((r, buf))
     }
 }
 
 impl Random {
-    fn from_now(bytes: &[u8; 28]) -> Random {
+    // Copies random bytes from another random and sets the first 4 bytes to a timestamp for
+    // the current time
+    // TODO: check if this is the correct behaviour!
+    fn from_now(random: &Random) -> Random {
         let ts = Utc::now().timestamp() as u32;
-        Random { gmt_unix_time: ts, random_bytes: bytes.clone() }
+
+        // copy unix timestamp followed by client random bytes
+        let mut bytes = random.bytes.clone();
+        bytes[0..4].copy_from_slice(ts.to_be_bytes().as_slice());
+
+        Random { bytes }
     }
 }
 
@@ -277,6 +305,37 @@ fn write_elements<L, T>(buf: &mut [u8], elems: &[T])
     }
 }
 
+fn read_slice(buf: &[u8], length: usize) -> Result<(&[u8], &[u8]), BinaryReadError> {
+    if buf.len() >= length {
+        Ok(buf.split_at(length))
+    } else {
+        Err(BinaryReadError::BufferTooSmall)
+    }
+}
+
+fn read_elements<L, T>(buf: &[u8]) -> Result<(Vec<T>, &[u8]), BinaryReadError>
+    where L: Into<usize> + BinaryReadable + FixedBinaryLength,
+          T: BinaryReadable + FixedBinaryLength
+{
+    // read length
+    let (length, buf) = L::read_from(buf)?;
+    let length = length.into();
+
+    // read element bytes
+    let byte_length = length * T::fixed_binary_len();
+    let (element_bytes, buf) = read_slice(buf, byte_length)?;
+
+    let mut v = Vec::with_capacity(length);
+    for i in (0..length).step_by(T::fixed_binary_len()) {
+        // TODO: possible to ensure this can't fail statically?
+        // TODO: check bytes read == fixed_binary_len()?
+        let (elem, _) = T::read_from(&element_bytes[i..])?;
+        v.push(elem);
+    }
+
+    Ok((v, buf))
+}
+
 impl <T: FixedBinaryLength> BinaryLength for &[T] {
     fn binary_len(&self) -> usize {
         // length is a single byte
@@ -311,6 +370,12 @@ impl FixedBinaryLength for CompressionMethods {
 impl BinarySerialisable for CompressionMethods {
     fn write_to(&self, buf: &mut [u8]) {
         buf[0] = *self as u8;
+    }
+}
+
+impl BinaryReadable for CompressionMethods {
+    fn read_from(buf: &[u8]) -> Result<(Self, &[u8]), BinaryReadError> where Self: Sized {
+        read_into::<u8, CompressionMethods>(buf)
     }
 }
 
@@ -438,7 +503,7 @@ impl <T: HandshakeMessage + BinarySerialisable> BinarySerialisable for Handshake
 fn send_client_hello<W: Write>(dest: &mut W, params: &TLSParameters) -> io::Result<()> {
     let hello = ClientHello {
         client_version: TLS_VERSION,
-        random: Random::from_now(&params.client_random.random_bytes),
+        random: Random::from_now(&params.client_random),
         session_id: Vec::new(),
         compression_methods: vec![CompressionMethods::None],
         cipher_suites: CipherSuites(vec![CipherSuiteIdentifier::TLS_RSA_WITH_3DES_EDE_CBC_SHA])
@@ -674,10 +739,18 @@ fn send_alert_message<W: Write>(dest: &mut W, code: AlertDescription) -> io::Res
 enum TLSError {
     IOError(io::Error),
     ParseError(BinaryReadError),
-    UnknownMessage
+    UnknownMessage,
+    ProtocolError(String)
 }
 
 struct SessionId(Vec<u8>);
+
+impl BinaryReadable for SessionId {
+    fn read_from(buf: &[u8]) -> Result<(Self, &[u8]), BinaryReadError> where Self: Sized {
+        let (bytes, buf) = read_elements::<u8, u8>(buf)?;
+        Ok((SessionId(bytes), buf))
+    }
+}
 
 struct ServerHello {
     server_version: ProtocolVersion,
@@ -689,7 +762,21 @@ struct ServerHello {
 
 impl BinaryReadable for ServerHello {
     fn read_from(buf: &[u8]) -> Result<(Self, &[u8]), BinaryReadError> where Self: Sized {
-        todo!()
+        let (server_version, buf) = ProtocolVersion::read_from(buf)?;
+        let (random, buf) = Random::read_from(buf)?;
+        let (session_id, buf) = SessionId::read_from(buf)?;
+        let (cipher_suite, buf) = CipherSuiteIdentifier::read_from(buf)?;
+        let (compression_method, buf) = CompressionMethods::read_from(buf)?;
+
+        let server_hello = ServerHello {
+            server_version,
+            random,
+            session_id,
+            cipher_suite,
+            compression_method
+        };
+
+        Ok((server_hello, buf))
     }
 }
 
@@ -746,15 +833,17 @@ fn receive_tls_msg(conn: &mut TcpStream) -> Result<ServerMessage, TLSError> {
 }
 
 // TODO: can change TcpStream to Read?
-fn tls_connect(conn: &mut TcpStream, tls_params: &mut TLSParameters) -> io::Result<()> {
+fn tls_connect(conn: &mut TcpStream, tls_params: &mut TLSParameters) -> Result<(), TLSError> {
     tls_params.init();
 
     // step 1
     // send the TLS handshake 'client hello' message
-    send_client_hello(conn, &tls_params)?;
+    send_client_hello(conn, &tls_params).map_err(TLSError::IOError)?;
 
     // step 2
     // receive the server hello response
+    let ServerMessage::Hello(server_hello) = receive_tls_msg(conn)?;
+    // TODO: update pending parameters with cipher suite
 
     todo!()
 }
