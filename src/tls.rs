@@ -219,6 +219,7 @@ impl BinarySerialisable for ProtocolVersion {
 
 const TLS_VERSION: ProtocolVersion = ProtocolVersion { major: 3, minor: 1 };
 
+#[derive(Clone)]
 struct Random {
     bytes: [u8; 32]
 }
@@ -379,8 +380,21 @@ impl BinaryReadable for CompressionMethods {
     }
 }
 
+#[derive(Clone)]
+struct ProtectionParameters {
+    suite: CipherSuiteIdentifier,
+    seq_num: u64
+}
+
+#[derive(Clone)]
 struct TLSParameters {
-    client_random: Random
+    client_random: Random,
+    server_random: Random,
+
+    pending_send_parameters: ProtectionParameters,
+    pending_recv_parameters: ProtectionParameters,
+    active_send_parameters: ProtectionParameters,
+    active_recv_parameters: ProtectionParameters
 }
 
 impl TLSParameters {
@@ -843,7 +857,10 @@ fn tls_connect(conn: &mut TcpStream, tls_params: &mut TLSParameters) -> Result<(
     // step 2
     // receive the server hello response
     let ServerMessage::Hello(server_hello) = receive_tls_msg(conn)?;
-    // TODO: update pending parameters with cipher suite
+
+    // update pending parameters with server cipher suite
+    tls_params.pending_recv_parameters.suite = server_hello.cipher_suite;
+    tls_params.pending_send_parameters.suite = server_hello.cipher_suite;
 
     todo!()
 }
