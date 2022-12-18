@@ -1,6 +1,6 @@
 use std::io::{self, Read, Write, ErrorKind};
 use std::convert::{TryFrom, TryInto};
-use std::fmt::{Debug};
+use std::fmt::{Debug, Display, Formatter};
 use chrono::{DateTime, Utc};
 use num_enum::{TryFromPrimitive};
 use std::net::{TcpStream};
@@ -556,6 +556,32 @@ enum AlertLevel {
     Fatal = 2
 }
 
+impl Display for AlertLevel {
+    fn fmt(&self, f: &mut Formatter<'_>) -> std::fmt::Result {
+        let s = match self {
+            AlertLevel::Warning => "Warning",
+            AlertLevel::Fatal => "Fatal"
+        };
+        f.write_str(s)
+    }
+}
+
+impl FixedBinaryLength for AlertLevel {
+    fn fixed_binary_len() -> usize { u8::fixed_binary_len() }
+}
+
+impl BinarySerialisable for AlertLevel {
+    fn write_to(&self, buf: &mut [u8]) {
+        (*self as u8).write_to(buf);
+    }
+}
+
+impl BinaryReadable for AlertLevel {
+    fn read_from(buf: &[u8]) -> Result<(Self, &[u8]), BinaryReadError> where Self: Sized {
+        read_into::<u8, AlertLevel>(buf)
+    }
+}
+
 #[derive(Copy, Clone, Debug, PartialEq, Eq, TryFromPrimitive)]
 #[repr(u8)]
 enum AlertDescription {
@@ -584,29 +610,56 @@ enum AlertDescription {
     NoRenegotiation = 100
 }
 
-struct Alert {
-    level: AlertLevel,
-    description: AlertDescription
-}
-
-impl FixedBinaryLength for AlertLevel {
-    fn fixed_binary_len() -> usize { u8::fixed_binary_len() }
+impl Display for AlertDescription {
+    fn fmt(&self, f: &mut Formatter<'_>) -> std::fmt::Result {
+        let s = match self {
+            AlertDescription::CloseNotify => "Close notify",
+            AlertDescription::UnexpectedMessage => "Unexpected message",
+            AlertDescription::BadRecordMAC => "Bad record MAC",
+            AlertDescription::DecryptionFailed => "Decryption failed",
+            AlertDescription::RecordOverflow => "Record Overflow",
+            AlertDescription::DecompressionFailure => "Decompression Failure",
+            AlertDescription::HandshakeFailure => "Handshake Failure",
+            AlertDescription::BadCertificate => "Bad Certificate",
+            AlertDescription::UnsupportedCertificate => "Unsupported Certificate",
+            AlertDescription::CertificateRevoked => "Certificate Revoked",
+            AlertDescription::CertificateExpired => "Certificate Expired",
+            AlertDescription::CertificateUnknown => "Certificate Unknown",
+            AlertDescription::IllegalParameter => "Illegal Parameter",
+            AlertDescription::UnknownCA => "Unknown CA",
+            AlertDescription::AccessDenied => "Access Denied",
+            AlertDescription::DecodeError => "Decode Error",
+            AlertDescription::DecryptError => "Decrypt Error",
+            AlertDescription::ExportRestriction => "Export Restriction",
+            AlertDescription::ProtocolVersion => "Protocol Version",
+            AlertDescription::InsufficientSecurity => "Insufficient Security",
+            AlertDescription::InternalError => "Internal Error",
+            AlertDescription::UserCancelled => "User Cancelled",
+            AlertDescription::NoRenegotiation => "No renegotiation"
+        };
+        f.write_str(s)
+    }
 }
 
 impl FixedBinaryLength for AlertDescription {
     fn fixed_binary_len() -> usize { u8::fixed_binary_len() }
 }
 
-impl BinarySerialisable for AlertLevel {
-    fn write_to(&self, buf: &mut [u8]) {
-        (*self as u8).write_to(buf);
-    }
-}
-
 impl BinarySerialisable for AlertDescription {
     fn write_to(&self, buf: &mut [u8]) {
         (*self as u8).write_to(buf)
     }
+}
+
+impl BinaryReadable for AlertDescription {
+    fn read_from(buf: &[u8]) -> Result<(Self, &[u8]), BinaryReadError> where Self: Sized {
+        read_into::<u8, AlertDescription>(buf)
+    }
+}
+
+struct Alert {
+    level: AlertLevel,
+    description: AlertDescription
 }
 
 impl BinarySerialisable for Alert {
@@ -619,6 +672,14 @@ impl BinarySerialisable for Alert {
 impl FixedBinaryLength for Alert {
     fn fixed_binary_len() -> usize {
         AlertLevel::fixed_binary_len() + AlertDescription::fixed_binary_len()
+    }
+}
+
+impl BinaryReadable for Alert {
+    fn read_from(buf: &[u8]) -> Result<(Self, &[u8]), BinaryReadError> where Self: Sized {
+        let (level, buf) = AlertLevel::read_from(buf)?;
+        let (description, buf) = AlertDescription::read_from(buf)?;
+        Ok((Alert { level, description }, buf))
     }
 }
 
@@ -795,7 +856,8 @@ impl BinaryReadable for ServerHello {
 }
 
 enum ServerMessage {
-    Hello(ServerHello)
+    Hello(ServerHello),
+    Alert(Alert)
 }
 
 struct HandshakeHeader {
@@ -812,18 +874,27 @@ impl BinaryReadable for HandshakeHeader {
 }
 
 fn parse_server_message(header: &TLSHeader, buf: Vec<u8>) -> Result<ServerMessage, TLSError> {
-    if header.message_type == ContentType::Handshake {
-        // TODO: create type for raw handshake message?
-        let (handshake_header, buf) = HandshakeHeader::read_from(buf.as_slice()).map_err(TLSError::ParseError)?;
-        if handshake_header.handshake_type == HandshakeType::SERVER_HELLO {
-            ServerHello::read_all_from(buf)
-                .map(ServerMessage::Hello)
+    match header.message_type {
+        ContentType::Handshake => {
+            // TODO: create type for raw handshake message?
+            let (handshake_header, buf) = HandshakeHeader::read_from(buf.as_slice()).map_err(TLSError::ParseError)?;
+            if handshake_header.handshake_type == HandshakeType::SERVER_HELLO {
+                ServerHello::read_all_from(buf)
+                    .map(ServerMessage::Hello)
+                    .map_err(TLSError::ParseError)
+            } else {
+                Err(TLSError::UnknownMessage)
+            }
+        },
+        ContentType::Alert => {
+            // TODO: Make Alerts errors?
+            Alert::read_all_from(buf.as_slice())
+                .map(ServerMessage::Alert)
                 .map_err(TLSError::ParseError)
-        } else {
+        }
+        _ => {
             Err(TLSError::UnknownMessage)
         }
-    } else {
-        Err(TLSError::UnknownMessage)
     }
 }
 
@@ -846,6 +917,10 @@ fn receive_tls_msg(conn: &mut TcpStream) -> Result<ServerMessage, TLSError> {
     }
 }
 
+fn report_alert(alert: &Alert) {
+    println!("Alert - {}: {}", alert.level, alert.description)
+}
+
 // TODO: can change TcpStream to Read?
 fn tls_connect(conn: &mut TcpStream, tls_params: &mut TLSParameters) -> Result<(), TLSError> {
     tls_params.init();
@@ -856,11 +931,17 @@ fn tls_connect(conn: &mut TcpStream, tls_params: &mut TLSParameters) -> Result<(
 
     // step 2
     // receive the server hello response
-    let ServerMessage::Hello(server_hello) = receive_tls_msg(conn)?;
 
-    // update pending parameters with server cipher suite
-    tls_params.pending_recv_parameters.suite = server_hello.cipher_suite;
-    tls_params.pending_send_parameters.suite = server_hello.cipher_suite;
+    match receive_tls_msg(conn)? {
+        ServerMessage::Hello(server_hello) => {
+            // update pending parameters with server cipher suite
+            tls_params.pending_recv_parameters.suite = server_hello.cipher_suite;
+            tls_params.pending_send_parameters.suite = server_hello.cipher_suite;
+        },
+        ServerMessage::Alert(alert) => {
+
+        }
+    };
 
     todo!()
 }
