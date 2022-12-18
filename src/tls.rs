@@ -5,6 +5,9 @@ use chrono::{DateTime, Utc};
 use num_enum::{TryFromPrimitive};
 use std::net::{TcpStream};
 
+use crate::x509::{self, SignedX509Certificate};
+use crate::tls::HandshakeType::SERVER_HELLO;
+
 trait BinaryLength {
     fn binary_len(&self) -> usize;
 }
@@ -447,33 +450,41 @@ impl HandshakeMessage for ClientHello {
     }
 }
 
-// represents the length field in a Handshake message header
-// its binary representation is 3 bytes
-struct HandshakeLength(u32);
+// Represents a 3-byte integer
+// This is used to encode the length of a Handshake message and the length of certificate chains
+// and their contained certificates
+struct U24(u32);
 
-impl TryFrom<usize> for HandshakeLength {
+impl TryFrom<usize> for U24 {
     type Error = ();
 
     fn try_from(value: usize) -> Result<Self, Self::Error> {
         if value > 0xFFFFFFusize {
             Err(())
         } else {
-            Ok(HandshakeLength(value as u32))
+            Ok(U24(value as u32))
         }
     }
 }
-impl FixedBinaryLength for HandshakeLength {
+
+impl From<U24> for usize {
+    fn from(v: U24) -> Self {
+        v.0 as usize
+    }
+}
+
+impl FixedBinaryLength for U24 {
     fn fixed_binary_len() -> usize { 3 }
 }
 
-impl BinarySerialisable for HandshakeLength {
+impl BinarySerialisable for U24 {
     fn write_to(&self, buf: &mut [u8]) {
         let len_bytes = self.0.to_be_bytes();
         buf[0..3].copy_from_slice(&len_bytes[1..]);
     }
 }
 
-impl BinaryReadable for HandshakeLength {
+impl BinaryReadable for U24 {
     fn read_from(buf: &[u8]) -> Result<(Self, &[u8]), BinaryReadError> where Self: Sized {
         if buf.len() < 3 {
             Err(BinaryReadError::BufferTooSmall)
@@ -481,7 +492,7 @@ impl BinaryReadable for HandshakeLength {
             let mut be_bytes: [u8; 4] = [0, 0, 0, 0];
             be_bytes[1..].copy_from_slice(&buf[0..3]);
             let value = u32::from_be_bytes(be_bytes);
-            Ok((HandshakeLength(value), &buf[3..]))
+            Ok((U24(value), &buf[3..]))
         }
     }
 }
@@ -506,7 +517,7 @@ impl <T: HandshakeMessage + BinarySerialisable> BinarySerialisable for Handshake
         // write inner message length
         // message length field is 3 bytes (24 bits)
         // TODO: validate message length fits? Should always be enough!
-        let len = HandshakeLength::try_from(msg.binary_len()).expect("Message too large");
+        let len = U24::try_from(msg.binary_len()).expect("Message too large");
         let buf = write_front(&len, buf);
 
         // write inner message
@@ -855,20 +866,64 @@ impl BinaryReadable for ServerHello {
     }
 }
 
+struct CertificateChain {
+    server_certificate: SignedX509Certificate,
+    validation_chain: Vec<SignedX509Certificate>
+}
+
+struct ServerCertificateChain {
+    chain: CertificateChain
+}
+
+fn read_x509_certificate(buf: &[u8]) -> Result<(SignedX509Certificate, &[u8]), BinaryReadError> {
+    let (cert_length_bytes, buf) = U24::read_from(buf)?;
+    let (cert_bytes, buf) = read_slice(buf, cert_length_bytes.into())?;
+
+    let cert = x509::parse(cert_bytes).map_err(|_| BinaryReadError::ValueOutOfRange)?;
+
+    Ok((cert, buf))
+}
+
+impl BinaryReadable for ServerCertificateChain {
+    fn read_from(buf: &[u8]) -> Result<(Self, &[u8]), BinaryReadError> where Self: Sized {
+        let (chain_length_bytes, buf) = U24::read_from(buf)?;
+        let chain_length_bytes: usize = chain_length_bytes.into();
+
+        let (chain_buf, remaining) = read_slice(buf, chain_length_bytes)?;
+
+        // chain should contain at least one certificate
+        let (server_certificate, validation_buf) = read_x509_certificate(chain_buf)?;
+
+        let mut validation_chain = Vec::new();
+        let mut validation_buf = validation_buf;
+
+        // parse remaining certificates
+        while validation_buf.len() > 0 {
+            let (cert, validation_remaining) = read_x509_certificate(validation_buf)?;
+            validation_chain.push(cert);
+            validation_buf = validation_remaining;
+        }
+
+        let chain = CertificateChain { server_certificate, validation_chain };
+        Ok((ServerCertificateChain { chain }, remaining))
+    }
+}
+
 enum ServerMessage {
     Hello(ServerHello),
-    Alert(Alert)
+    Alert(Alert),
+    CertificateChain(ServerCertificateChain)
 }
 
 struct HandshakeHeader {
     handshake_type: HandshakeType,
-    length: HandshakeLength
+    length: U24
 }
 
 impl BinaryReadable for HandshakeHeader {
     fn read_from(buf: &[u8]) -> Result<(Self, &[u8]), BinaryReadError> where Self: Sized {
         let (handshake_type, buf) = HandshakeType::read_from(buf)?;
-        let (length, buf) = HandshakeLength::read_from(buf)?;
+        let (length, buf) = U24::read_from(buf)?;
         Ok((HandshakeHeader { handshake_type, length }, buf))
     }
 }
@@ -877,13 +932,20 @@ fn parse_server_message(header: &TLSHeader, buf: Vec<u8>) -> Result<ServerMessag
     match header.message_type {
         ContentType::Handshake => {
             // TODO: create type for raw handshake message?
+            // TODO: handle multiple handshake messages
             let (handshake_header, buf) = HandshakeHeader::read_from(buf.as_slice()).map_err(TLSError::ParseError)?;
-            if handshake_header.handshake_type == HandshakeType::SERVER_HELLO {
-                ServerHello::read_all_from(buf)
-                    .map(ServerMessage::Hello)
-                    .map_err(TLSError::ParseError)
-            } else {
-                Err(TLSError::UnknownMessage)
+            match handshake_header.handshake_type {
+                HandshakeType::SERVER_HELLO => {
+                    ServerHello::read_all_from(buf)
+                        .map(ServerMessage::Hello)
+                        .map_err(TLSError::ParseError)
+                },
+                HandshakeType::CERTIFICATE => {
+                    ServerCertificateChain::read_all_from(buf)
+                        .map(ServerMessage::CertificateChain)
+                        .map_err(TLSError::ParseError)
+                }
+                _ => Err(TLSError::UnknownMessage)
             }
         },
         ContentType::Alert => {
@@ -938,8 +1000,11 @@ fn tls_connect(conn: &mut TcpStream, tls_params: &mut TLSParameters) -> Result<(
             tls_params.pending_recv_parameters.suite = server_hello.cipher_suite;
             tls_params.pending_send_parameters.suite = server_hello.cipher_suite;
         },
+        ServerMessage::CertificateChain(server_cert_chain) => {
+            todo!()
+        }
         ServerMessage::Alert(alert) => {
-
+            report_alert(&alert);
         }
     };
 
