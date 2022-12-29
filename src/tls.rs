@@ -6,7 +6,6 @@ use num_enum::{TryFromPrimitive};
 use std::net::{TcpStream};
 
 use crate::x509::{self, SignedX509Certificate};
-use crate::tls::HandshakeType::SERVER_HELLO;
 
 trait BinaryLength {
     fn binary_len(&self) -> usize;
@@ -398,7 +397,9 @@ struct TLSParameters {
     pending_send_parameters: ProtectionParameters,
     pending_recv_parameters: ProtectionParameters,
     active_send_parameters: ProtectionParameters,
-    active_recv_parameters: ProtectionParameters
+    active_recv_parameters: ProtectionParameters,
+
+    server_hello_done: bool
 }
 
 impl TLSParameters {
@@ -949,7 +950,8 @@ impl BinaryReadable for ServerCertificateChain {
 
 enum ServerHandshakeMessage {
     Hello(ServerHello),
-    CertificateChain(ServerCertificateChain)
+    CertificateChain(ServerCertificateChain),
+    Done
 }
 
 impl BinaryReadable for ServerHandshakeMessage {
@@ -965,6 +967,11 @@ impl BinaryReadable for ServerHandshakeMessage {
             },
             HandshakeType::CERTIFICATE => {
                 ServerCertificateChain::read_all_from(message_buf).map(ServerHandshakeMessage::CertificateChain)
+            },
+            HandshakeType::SERVER_HELLO_DONE => {
+                // 'server hello done' message contains no data
+                // TODO: check message_buf is empty?
+                Ok(ServerHandshakeMessage::Done)
             }
             _ => Err(BinaryReadError::UnknownType)
         }?;
@@ -1043,26 +1050,30 @@ fn tls_connect(conn: &mut TcpStream, tls_params: &mut TLSParameters) -> Result<(
 
     // step 2
     // receive the server hello response
-
-    match receive_tls_msg(conn)? {
-        ServerMessage::Handshakes(handshakes) => {
-            for handshake in handshakes {
-                match handshake {
-                    ServerHandshakeMessage::Hello(server_hello) => {
-                        // update pending parameters with server cipher suite
-                        tls_params.pending_recv_parameters.suite = server_hello.cipher_suite;
-                        tls_params.pending_send_parameters.suite = server_hello.cipher_suite;
-                    },
-                    ServerHandshakeMessage::CertificateChain(server_cert_chain) => {
-                        todo!()
+    while !tls_params.server_hello_done {
+        match receive_tls_msg(conn)? {
+            ServerMessage::Handshakes(handshakes) => {
+                for handshake in handshakes {
+                    match handshake {
+                        ServerHandshakeMessage::Hello(server_hello) => {
+                            // update pending parameters with server cipher suite
+                            tls_params.pending_recv_parameters.suite = server_hello.cipher_suite;
+                            tls_params.pending_send_parameters.suite = server_hello.cipher_suite;
+                        },
+                        ServerHandshakeMessage::CertificateChain(server_cert_chain) => {
+                            todo!()
+                        },
+                        ServerHandshakeMessage::Done => {
+                            tls_params.server_hello_done = true;
+                        }
                     }
                 }
+            },
+            ServerMessage::Alert(alert) => {
+                report_alert(&alert);
             }
-        },
-        ServerMessage::Alert(alert) => {
-            report_alert(&alert);
-        }
-    };
+        };
+    }
 
     todo!()
 }
