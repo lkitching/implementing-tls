@@ -2,6 +2,7 @@ use std::io;
 
 pub trait HashAlgorithm {
     type State;
+    fn output_length_bytes(&self) -> usize;
     fn initialise(&self) -> Self::State;
     fn block_size(&self) -> usize;
     fn input_block_size(&self) -> usize;

@@ -266,6 +266,8 @@ pub struct MD5HashAlgorithm {}
 impl HashAlgorithm for MD5HashAlgorithm {
     type State = [u32; MD5_RESULT_SIZE];
 
+    fn output_length_bytes(&self) -> usize { 16 }
+
     fn initialise(&self) -> Self::State {
         MD5_INITIAL_HASH
     }

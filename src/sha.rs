@@ -143,6 +143,8 @@ pub struct SHA1HashAlgorithm {}
 impl HashAlgorithm for SHA1HashAlgorithm {
     type State = [u32; SHA1_RESULT_SIZE];
 
+    fn output_length_bytes(&self) -> usize { 20 }
+
     fn initialise(&self) -> Self::State {
         SHA1_INITIAL_HASH.clone()
     }
@@ -272,6 +274,8 @@ pub struct SHA256HashAlgorithm {}
 
 impl HashAlgorithm for SHA256HashAlgorithm {
     type State = [u32; 8];
+
+    fn output_length_bytes(&self) -> usize { 32 }
 
     fn initialise(&self) -> Self::State {
         SHA256_INITIAL_HASH.clone()
