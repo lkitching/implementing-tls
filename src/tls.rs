@@ -498,31 +498,70 @@ impl BinaryReadable for U24 {
     }
 }
 
-struct Handshake<T>(T);
+struct HandshakeHeader {
+    handshake_type: HandshakeType,
+    length: U24
+}
 
-impl <T: BinaryLength> BinaryLength for Handshake<T> {
-    fn binary_len(&self) -> usize {
-        // 1 byte for message type
-        // 3 bytes for inner message length
-        self.0.binary_len() + HandshakeType::fixed_binary_len() + 3
+impl FixedBinaryLength for HandshakeHeader {
+    fn fixed_binary_len() -> usize {
+        HandshakeType::fixed_binary_len() + U24::fixed_binary_len()
     }
 }
 
-impl <T: HandshakeMessage + BinarySerialisable> BinarySerialisable for Handshake<T> {
+impl BinarySerialisable for HandshakeHeader {
     fn write_to(&self, buf: &mut [u8]) {
-        let msg = &self.0;
+        let buf = write_front(&self.handshake_type, buf);
+        write_front(&self.length, buf);
+    }
+}
 
-        // write message type
-        let buf = write_front(&msg.handshake_message_type(), buf);
+impl BinaryReadable for HandshakeHeader {
+    fn read_from(buf: &[u8]) -> Result<(Self, &[u8]), BinaryReadError> where Self: Sized {
+        let (handshake_type, buf) = HandshakeType::read_from(buf)?;
+        let (length, buf) = U24::read_from(buf)?;
+        Ok((HandshakeHeader { handshake_type, length }, buf))
+    }
+}
 
-        // write inner message length
-        // message length field is 3 bytes (24 bits)
-        // TODO: validate message length fits? Should always be enough!
-        let len = U24::try_from(msg.binary_len()).expect("Message too large");
-        let buf = write_front(&len, buf);
+enum ClientHandshakeMessage {
+    Hello(ClientHello)
+}
 
-        // write inner message
-        msg.write_to(&mut buf[3..]);
+impl ClientHandshakeMessage {
+    fn get_header(&self) -> HandshakeHeader {
+        match self {
+            Self::Hello(client_hello) => {
+                // TODO: validate message length fits? Should always be enough!
+                let length = U24::try_from(client_hello.binary_len()).expect("Message too large");
+                HandshakeHeader { handshake_type: HandshakeType::CLIENT_HELLO, length }
+            }
+        }
+    }
+}
+
+impl BinaryLength for ClientHandshakeMessage {
+    fn binary_len(&self) -> usize {
+        let message_len = match self {
+            Self::Hello(hello) => hello.binary_len()
+        };
+        HandshakeHeader::fixed_binary_len() + message_len
+    }
+}
+
+impl BinarySerialisable for ClientHandshakeMessage {
+    fn write_to(&self, buf: &mut [u8]) {
+        let header = self.get_header();
+
+        // write header
+        let buf = write_front(&header, buf);
+
+        // write message
+        match self {
+            ClientHandshakeMessage::Hello(client_hello) => {
+                write_front(client_hello, buf)
+            }
+        };
     }
 }
 
@@ -535,18 +574,16 @@ fn send_client_hello<W: Write>(dest: &mut W, params: &TLSParameters) -> io::Resu
         cipher_suites: CipherSuites(vec![CipherSuiteIdentifier::TLS_RSA_WITH_3DES_EDE_CBC_SHA])
     };
 
-    send_handshake_message(dest, hello)
+    send_handshake_message(dest, ClientHandshakeMessage::Hello(hello))
 }
 
-fn send_handshake_message<W: Write, H: HandshakeMessage + BinarySerialisable>(dest: &mut W, handshake_message: H) -> io::Result<()> {
-    let wrapped = Handshake(handshake_message);
-    let buf = wrapped.write_to_vec();
+fn send_handshake_message<W: Write>(dest: &mut W, handshake_message: ClientHandshakeMessage) -> io::Result<()> {
     // TODO: update handshake message digests
 
     let msg = TLSPlaintext {
         // TODO: get from TLS parameters?
         version: TLS_VERSION,
-        message: wrapped
+        message: handshake_message
     };
 
     send_message(dest, msg)
@@ -726,7 +763,7 @@ trait TLSMessage {
     fn get_content_type(&self) -> ContentType;
 }
 
-impl <T> TLSMessage for Handshake<T> {
+impl TLSMessage for ClientHandshakeMessage {
     fn get_content_type(&self) -> ContentType {
         ContentType::Handshake
     }
@@ -939,19 +976,6 @@ impl BinaryReadable for ServerHandshakeMessage {
 enum ServerMessage {
     Alert(Alert),
     Handshakes(Vec<ServerHandshakeMessage>)
-}
-
-struct HandshakeHeader {
-    handshake_type: HandshakeType,
-    length: U24
-}
-
-impl BinaryReadable for HandshakeHeader {
-    fn read_from(buf: &[u8]) -> Result<(Self, &[u8]), BinaryReadError> where Self: Sized {
-        let (handshake_type, buf) = HandshakeType::read_from(buf)?;
-        let (length, buf) = U24::read_from(buf)?;
-        Ok((HandshakeHeader { handshake_type, length }, buf))
-    }
 }
 
 fn read_seq<T: BinaryReadable>(buf: &[u8]) -> Result<Vec<T>, BinaryReadError> {
