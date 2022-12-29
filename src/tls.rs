@@ -35,7 +35,8 @@ trait BinarySerialisable : BinaryLength {
 enum BinaryReadError {
     ValueOutOfRange,
     BufferTooSmall,
-    BufferTooLarge
+    BufferTooLarge,
+    UnknownType
 }
 
 trait BinaryReadable {
@@ -909,10 +910,35 @@ impl BinaryReadable for ServerCertificateChain {
     }
 }
 
-enum ServerMessage {
+enum ServerHandshakeMessage {
     Hello(ServerHello),
-    Alert(Alert),
     CertificateChain(ServerCertificateChain)
+}
+
+impl BinaryReadable for ServerHandshakeMessage {
+    fn read_from(buf: &[u8]) -> Result<(Self, &[u8]), BinaryReadError> where Self: Sized {
+        let (handshake_header, buf) = HandshakeHeader::read_from(buf)?;
+        let message_len: usize = handshake_header.length.into();
+
+        let (message_buf, remaining) = buf.split_at(message_len);
+
+        let handshake_message = match handshake_header.handshake_type {
+            HandshakeType::SERVER_HELLO => {
+                ServerHello::read_all_from(message_buf).map(ServerHandshakeMessage::Hello)
+            },
+            HandshakeType::CERTIFICATE => {
+                ServerCertificateChain::read_all_from(message_buf).map(ServerHandshakeMessage::CertificateChain)
+            }
+            _ => Err(BinaryReadError::UnknownType)
+        }?;
+
+        Ok((handshake_message, remaining))
+    }
+}
+
+enum ServerMessage {
+    Alert(Alert),
+    Handshakes(Vec<ServerHandshakeMessage>)
 }
 
 struct HandshakeHeader {
@@ -928,25 +954,25 @@ impl BinaryReadable for HandshakeHeader {
     }
 }
 
+fn read_seq<T: BinaryReadable>(buf: &[u8]) -> Result<Vec<T>, BinaryReadError> {
+    let mut result = Vec::new();
+    let mut buf = buf;
+
+    while ! buf.is_empty() {
+        let (v, remaining) = T::read_from(buf)?;
+        result.push(v);
+        buf = remaining
+    }
+
+    Ok(result)
+}
+
 fn parse_server_message(header: &TLSHeader, buf: Vec<u8>) -> Result<ServerMessage, TLSError> {
     match header.message_type {
         ContentType::Handshake => {
-            // TODO: create type for raw handshake message?
-            // TODO: handle multiple handshake messages
-            let (handshake_header, buf) = HandshakeHeader::read_from(buf.as_slice()).map_err(TLSError::ParseError)?;
-            match handshake_header.handshake_type {
-                HandshakeType::SERVER_HELLO => {
-                    ServerHello::read_all_from(buf)
-                        .map(ServerMessage::Hello)
-                        .map_err(TLSError::ParseError)
-                },
-                HandshakeType::CERTIFICATE => {
-                    ServerCertificateChain::read_all_from(buf)
-                        .map(ServerMessage::CertificateChain)
-                        .map_err(TLSError::ParseError)
-                }
-                _ => Err(TLSError::UnknownMessage)
-            }
+            read_seq(buf.as_slice())
+                .map(ServerMessage::Handshakes)
+                .map_err(TLSError::ParseError)
         },
         ContentType::Alert => {
             // TODO: Make Alerts errors?
@@ -995,14 +1021,20 @@ fn tls_connect(conn: &mut TcpStream, tls_params: &mut TLSParameters) -> Result<(
     // receive the server hello response
 
     match receive_tls_msg(conn)? {
-        ServerMessage::Hello(server_hello) => {
-            // update pending parameters with server cipher suite
-            tls_params.pending_recv_parameters.suite = server_hello.cipher_suite;
-            tls_params.pending_send_parameters.suite = server_hello.cipher_suite;
+        ServerMessage::Handshakes(handshakes) => {
+            for handshake in handshakes {
+                match handshake {
+                    ServerHandshakeMessage::Hello(server_hello) => {
+                        // update pending parameters with server cipher suite
+                        tls_params.pending_recv_parameters.suite = server_hello.cipher_suite;
+                        tls_params.pending_send_parameters.suite = server_hello.cipher_suite;
+                    },
+                    ServerHandshakeMessage::CertificateChain(server_cert_chain) => {
+                        todo!()
+                    }
+                }
+            }
         },
-        ServerMessage::CertificateChain(server_cert_chain) => {
-            todo!()
-        }
         ServerMessage::Alert(alert) => {
             report_alert(&alert);
         }
