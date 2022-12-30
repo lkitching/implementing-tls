@@ -334,11 +334,14 @@ fn parse_validity(node: &ASN1Item) -> Result<Validity, X509Error> {
     Ok(Validity { not_before, not_after })
 }
 
-struct DSAKeyInfo {
-    public_key: Huge,
-    params: DSAParams
+#[derive(Clone)]
+pub struct DSAKeyInfo {
+    pub public_key: Huge,
+    pub params: DSAParams
 }
-enum PublicKeyInfo {
+
+#[derive(Clone)]
+pub enum PublicKeyInfo {
     RSA(rsa::RSAKey),
     DSA(DSAKeyInfo)
 }

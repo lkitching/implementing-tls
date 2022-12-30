@@ -1,6 +1,7 @@
 use crate::huge::{Huge, DivResult};
 use crate::hex;
 
+#[derive(Clone)]
 pub struct RSAKey {
     pub modulus: Huge,
     pub exponent: Huge

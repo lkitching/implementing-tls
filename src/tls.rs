@@ -5,7 +5,9 @@ use chrono::{DateTime, Utc};
 use num_enum::{TryFromPrimitive};
 use std::net::{TcpStream};
 
-use crate::x509::{self, SignedX509Certificate};
+use crate::x509::{self, SignedX509Certificate, PublicKeyInfo};
+use crate::prf::prf;
+use crate::rsa::{self, RSAKey};
 
 trait BinaryLength {
     fn binary_len(&self) -> usize;
@@ -164,6 +166,33 @@ enum CipherSuiteIdentifier {
     TLS_DH_anon_WITH_AES_256_CBC_SHA  = 0x003A,
 }
 
+impl CipherSuiteIdentifier {
+    pub fn key_exchange_method(&self) -> KeyExchangeMethod {
+        match self {
+            Self::TLS_NULL_WITH_NULL_NULL => {
+                KeyExchangeMethod::None
+            },
+            Self::TLS_RSA_WITH_NULL_MD5 |
+            Self::TLS_RSA_WITH_NULL_SHA |
+            Self::TLS_RSA_EXPORT_WITH_RC4_40_MD5 |
+            Self::TLS_RSA_WITH_RC4_128_MD5 |
+            Self::TLS_RSA_WITH_RC4_128_SHA |
+            Self::TLS_RSA_EXPORT_WITH_RC2_CBC_40_MD5 |
+            Self::TLS_RSA_WITH_IDEA_CBC_SHA |
+            Self::TLS_RSA_EXPORT_WITH_DES40_CBC_SHA |
+            Self::TLS_RSA_WITH_DES_CBC_SHA |
+            Self::TLS_RSA_WITH_3DES_EDE_CBC_SHA |
+            Self::TLS_RSA_WITH_AES_128_CBC_SHA |
+            Self::TLS_RSA_WITH_AES_256_CBC_SHA => {
+                KeyExchangeMethod::RSA
+            },
+            _ => {
+                KeyExchangeMethod::DH
+            }
+        }
+    }
+}
+
 impl FixedBinaryLength for CipherSuiteIdentifier {
     fn fixed_binary_len() -> usize { u16::fixed_binary_len() }
 }
@@ -226,6 +255,11 @@ const TLS_VERSION: ProtocolVersion = ProtocolVersion { major: 3, minor: 1 };
 struct Random {
     bytes: [u8; 32]
 }
+
+const MASTER_SECRET_LENGTH: usize = 48;
+const RANDOM_LENGTH: usize = 32;
+
+type MasterSecret = [u8; MASTER_SECRET_LENGTH];
 
 impl FixedBinaryLength for Random {
     fn fixed_binary_len() -> usize { 32 }
@@ -391,6 +425,7 @@ struct ProtectionParameters {
 
 #[derive(Clone)]
 struct TLSParameters {
+    master_secret: MasterSecret,
     client_random: Random,
     server_random: Random,
 
@@ -398,6 +433,8 @@ struct TLSParameters {
     pending_recv_parameters: ProtectionParameters,
     active_send_parameters: ProtectionParameters,
     active_recv_parameters: ProtectionParameters,
+
+    server_public_key: PublicKeyInfo,
 
     server_hello_done: bool
 }
@@ -526,7 +563,8 @@ impl BinaryReadable for HandshakeHeader {
 }
 
 enum ClientHandshakeMessage {
-    Hello(ClientHello)
+    Hello(ClientHello),
+    RSAKeyExchange(RSAKeyExchange)
 }
 
 impl ClientHandshakeMessage {
@@ -536,6 +574,10 @@ impl ClientHandshakeMessage {
                 // TODO: validate message length fits? Should always be enough!
                 let length = U24::try_from(client_hello.binary_len()).expect("Message too large");
                 HandshakeHeader { handshake_type: HandshakeType::CLIENT_HELLO, length }
+            },
+            Self::RSAKeyExchange(rsa_key_exchange) => {
+                let length = U24::try_from(rsa_key_exchange.binary_len()).expect("Message too large");
+                HandshakeHeader { handshake_type: HandshakeType::CLIENT_KEY_EXCHANGE, length }
             }
         }
     }
@@ -544,7 +586,8 @@ impl ClientHandshakeMessage {
 impl BinaryLength for ClientHandshakeMessage {
     fn binary_len(&self) -> usize {
         let message_len = match self {
-            Self::Hello(hello) => hello.binary_len()
+            Self::Hello(hello) => hello.binary_len(),
+            Self::RSAKeyExchange(rsa_key_exchange) => rsa_key_exchange.binary_len()
         };
         HandshakeHeader::fixed_binary_len() + message_len
     }
@@ -559,8 +602,11 @@ impl BinarySerialisable for ClientHandshakeMessage {
 
         // write message
         match self {
-            ClientHandshakeMessage::Hello(client_hello) => {
+            Self::Hello(client_hello) => {
                 write_front(client_hello, buf)
+            },
+            Self::RSAKeyExchange(rsa_key_exchange) => {
+                write_front(rsa_key_exchange, buf)
             }
         };
     }
@@ -576,6 +622,81 @@ fn send_client_hello<W: Write>(dest: &mut W, params: &TLSParameters) -> io::Resu
     };
 
     send_handshake_message(dest, ClientHandshakeMessage::Hello(hello))
+}
+
+enum KeyExchangeMethod {
+    RSA,
+    DH,
+    None
+}
+
+#[derive(Clone)]
+struct RSAKeyExchange {
+    premaster_secret: MasterSecret,
+    encrypted_premaster_secret: Vec<u8>
+}
+
+impl RSAKeyExchange {
+    fn new(version: &ProtocolVersion, key: &RSAKey) -> Self {
+        let mut premaster_secret = [0u8; MASTER_SECRET_LENGTH];
+        let buf = write_front(version, premaster_secret.as_mut_slice());
+
+        // NOTE: Should be random!
+        for i in 0..buf.len() {
+            premaster_secret[i] = i as u8;
+        }
+
+        let encrypted_premaster_secret = rsa::rsa_encrypt(key, premaster_secret.as_slice());
+
+        Self { premaster_secret, encrypted_premaster_secret }
+    }
+}
+
+impl BinaryLength for RSAKeyExchange {
+    fn binary_len(&self) -> usize {
+        // 1 byte for ?
+        // 1 byte for length
+        // n bytes for encrypted premaster secret
+        1 + 1 + self.encrypted_premaster_secret.len()
+    }
+}
+
+impl BinarySerialisable for RSAKeyExchange {
+    fn write_to(&self, buf: &mut [u8]) {
+        // TODO: what's this for?
+        let buf = write_front(&0u8, buf);
+        write_elements::<u8, u8>(buf, self.encrypted_premaster_secret.as_slice());
+    }
+}
+
+fn send_client_key_exchange<W: Write>(dest: &mut W, parameters: &mut TLSParameters) -> Result<(), TLSError> {
+    let key_exchange_message = match parameters.pending_send_parameters.suite.key_exchange_method() {
+        KeyExchangeMethod::RSA => {
+            // server key should be RSA!
+            match &parameters.server_public_key {
+                PublicKeyInfo::RSA(rsa_key) => {
+                    Ok(RSAKeyExchange::new(&TLS_VERSION, rsa_key))
+                },
+                _ => {
+                    Err(TLSError::ProtocolError("Server requires RSA key exchange with non-RSA public key".to_owned()))
+                }
+            }
+        },
+        _ => {
+            todo!()
+        }
+    }?;
+
+    send_handshake_message(dest, ClientHandshakeMessage::RSAKeyExchange(key_exchange_message.clone())).map_err(TLSError::IOError)?;
+
+    // calculate the master secret from the premaster secret
+    // the server side will perform the same calculation
+    compute_master_secret(key_exchange_message.premaster_secret.as_slice(), parameters);
+
+    // TODO: purge the premaster secret from memory
+    // calculate_keys(parameters)
+
+    Ok(())
 }
 
 fn send_handshake_message<W: Write>(dest: &mut W, handshake_message: ClientHandshakeMessage) -> io::Result<()> {
@@ -1017,6 +1138,19 @@ fn parse_server_message(header: &TLSHeader, buf: Vec<u8>) -> Result<ServerMessag
     }
 }
 
+// TODO: make method on TLSParameters?
+fn compute_master_secret(premaster_secret: &[u8], parameters: &mut TLSParameters) {
+    let label = "master secret".as_bytes();
+
+    // seed is concatenation of the client and server random
+    let seed = [parameters.client_random.bytes.as_slice(), parameters.server_random.bytes.as_slice()].concat();
+
+    let mut master_secret = [0u8; MASTER_SECRET_LENGTH];
+    prf(premaster_secret, label, seed.as_slice(), master_secret.as_mut_slice());
+
+    parameters.master_secret = master_secret
+}
+
 fn receive_tls_msg(conn: &mut TcpStream) -> Result<ServerMessage, TLSError> {
     // read TLS Record header
     let header_buf = read_exact(conn, TLSHeader::fixed_binary_len()).map_err(TLSError::IOError)?;
@@ -1074,6 +1208,10 @@ fn tls_connect(conn: &mut TcpStream, tls_params: &mut TLSParameters) -> Result<(
             }
         };
     }
+
+    // step 3
+    // send client key exchange
+    send_client_key_exchange(conn, tls_params)?;
 
     todo!()
 }

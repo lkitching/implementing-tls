@@ -2,6 +2,7 @@ use crate::huge::*;
 use std::cmp;
 use crate::hex;
 
+#[derive(Clone)]
 pub struct DSAParams {
     pub g: Huge,
     pub p: Huge,
