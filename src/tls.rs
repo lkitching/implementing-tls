@@ -527,6 +527,14 @@ impl ProtectionParameters {
         self.key = key.to_vec();
         self.iv = iv.to_vec();
     }
+
+    fn init(&mut self) {
+        self.suite = CipherSuiteIdentifier::TLS_NULL_WITH_NULL_NULL;
+        self.seq_num = 0;
+        self.mac_secret = Vec::new();
+        self.key = Vec::new();
+        self.iv = Vec::new();
+    }
 }
 
 #[derive(Clone)]
@@ -549,6 +557,11 @@ struct TLSParameters {
 impl TLSParameters {
     fn init(&mut self) {
         todo!()
+    }
+
+    fn make_active(&mut self) {
+        self.active_send_parameters = self.pending_send_parameters.clone();
+        self.pending_send_parameters.init();
     }
 }
 
@@ -1314,9 +1327,49 @@ impl BinaryReadable for ServerHandshakeMessage {
     }
 }
 
+struct ChangeCipherSpec {}
+
+impl FixedBinaryLength for ChangeCipherSpec {
+    fn fixed_binary_len() -> usize { u8::fixed_binary_len() }
+}
+
+impl BinarySerialisable for ChangeCipherSpec {
+    fn write_to(&self, buf: &mut [u8]) {
+        1u8.write_to(buf)
+    }
+}
+
+impl BinaryReadable for ChangeCipherSpec {
+    fn read_from(buf: &[u8]) -> Result<(Self, &[u8]), BinaryReadError> where Self: Sized {
+        let (b, rest) = u8::read_from(buf)?;
+        if b == 1 {
+            Ok((ChangeCipherSpec {}, rest))
+        } else {
+            Err(BinaryReadError::ValueOutOfRange)
+        }
+    }
+}
+
+impl TLSMessage for ChangeCipherSpec {
+    fn get_content_type(&self) -> ContentType {
+        ContentType::ChangeCipherSpec
+    }
+}
+
+fn send_change_cipher_spec<W: Write>(conn: &mut W, parameters: &mut TLSParameters) -> Result<(), TLSError> {
+    let msg = TLSPlaintext { version: TLS_VERSION.clone(), message: ChangeCipherSpec { } };
+    send_message(conn, msg).map_err(TLSError::IOError)?;
+
+    parameters.pending_send_parameters.seq_num = 0;
+    parameters.make_active();
+
+    Ok(())
+}
+
 enum ServerMessage {
     Alert(Alert),
-    Handshakes(Vec<ServerHandshakeMessage>)
+    Handshakes(Vec<ServerHandshakeMessage>),
+    ChangeCipherSpec
 }
 
 fn read_seq<T: BinaryReadable>(buf: &[u8]) -> Result<Vec<T>, BinaryReadError> {
@@ -1343,6 +1396,11 @@ fn parse_server_message(header: &TLSHeader, buf: Vec<u8>) -> Result<ServerMessag
             // TODO: Make Alerts errors?
             Alert::read_all_from(buf.as_slice())
                 .map(ServerMessage::Alert)
+                .map_err(TLSError::ParseError)
+        },
+        ContentType::ChangeCipherSpec => {
+            ChangeCipherSpec::read_all_from(buf.as_slice())
+                .map(|_| ServerMessage::ChangeCipherSpec)
                 .map_err(TLSError::ParseError)
         }
         _ => {
@@ -1416,6 +1474,10 @@ fn tls_connect(conn: &mut TcpStream, tls_params: &mut TLSParameters) -> Result<(
                     }
                 }
             },
+            ServerMessage::ChangeCipherSpec => {
+                // TODO: can handle?
+                return Err(TLSError::ProtocolError("Unexpected 'change cipher spec' message while waiting for server handshake".to_owned()))
+            }
             ServerMessage::Alert(alert) => {
                 report_alert(&alert);
             }
@@ -1425,6 +1487,10 @@ fn tls_connect(conn: &mut TcpStream, tls_params: &mut TLSParameters) -> Result<(
     // step 3
     // send client key exchange
     send_client_key_exchange(conn, tls_params)?;
+
+    // step 4
+    // send 'change cipher spec' message
+    send_change_cipher_spec(conn, tls_params)?;
 
     todo!()
 }
