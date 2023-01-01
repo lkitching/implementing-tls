@@ -1,13 +1,16 @@
 use std::io::{self, Read, Write, ErrorKind};
 use std::convert::{TryFrom, TryInto};
 use std::fmt::{Debug, Display, Formatter};
+use std::net::{TcpStream};
+
 use chrono::{DateTime, Utc};
 use num_enum::{TryFromPrimitive};
-use std::net::{TcpStream};
 
 use crate::x509::{self, SignedX509Certificate, PublicKeyInfo};
 use crate::prf::{prf, prf_bytes};
 use crate::rsa::{self, RSAKey};
+use crate::dh::{DHKey};
+use crate::huge::{Huge};
 
 trait BinaryLength {
     fn binary_len(&self) -> usize;
@@ -538,6 +541,7 @@ struct TLSParameters {
     active_recv_parameters: ProtectionParameters,
 
     server_public_key: PublicKeyInfo,
+    server_dh_key: Option<DHKey>,
 
     server_hello_done: bool
 }
@@ -667,7 +671,7 @@ impl BinaryReadable for HandshakeHeader {
 
 enum ClientHandshakeMessage {
     Hello(ClientHello),
-    RSAKeyExchange(RSAKeyExchange)
+    KeyExchange(KeyExchange)
 }
 
 impl ClientHandshakeMessage {
@@ -678,8 +682,8 @@ impl ClientHandshakeMessage {
                 let length = U24::try_from(client_hello.binary_len()).expect("Message too large");
                 HandshakeHeader { handshake_type: HandshakeType::CLIENT_HELLO, length }
             },
-            Self::RSAKeyExchange(rsa_key_exchange) => {
-                let length = U24::try_from(rsa_key_exchange.binary_len()).expect("Message too large");
+            Self::KeyExchange(key_exchange) => {
+                let length = U24::try_from(key_exchange.binary_len()).expect("Message too large");
                 HandshakeHeader { handshake_type: HandshakeType::CLIENT_KEY_EXCHANGE, length }
             }
         }
@@ -690,7 +694,7 @@ impl BinaryLength for ClientHandshakeMessage {
     fn binary_len(&self) -> usize {
         let message_len = match self {
             Self::Hello(hello) => hello.binary_len(),
-            Self::RSAKeyExchange(rsa_key_exchange) => rsa_key_exchange.binary_len()
+            Self::KeyExchange(rsa_key_exchange) => rsa_key_exchange.binary_len()
         };
         HandshakeHeader::fixed_binary_len() + message_len
     }
@@ -708,7 +712,7 @@ impl BinarySerialisable for ClientHandshakeMessage {
             Self::Hello(client_hello) => {
                 write_front(client_hello, buf)
             },
-            Self::RSAKeyExchange(rsa_key_exchange) => {
+            Self::KeyExchange(rsa_key_exchange) => {
                 write_front(rsa_key_exchange, buf)
             }
         };
@@ -731,6 +735,39 @@ enum KeyExchangeMethod {
     RSA,
     DH,
     None
+}
+
+#[derive(Clone)]
+enum KeyExchange {
+    RSA(RSAKeyExchange),
+    DH(DHKeyExchange)
+}
+
+impl BinaryLength for KeyExchange {
+    fn binary_len(&self) -> usize {
+        match self {
+            Self::RSA(rsa_exchange) => rsa_exchange.binary_len(),
+            Self::DH(dh_exchange) => dh_exchange.binary_len()
+        }
+    }
+}
+
+impl BinarySerialisable for KeyExchange {
+    fn write_to(&self, buf: &mut [u8]) {
+        match self {
+            Self::RSA(rsa_exchange) => { rsa_exchange.write_to(buf) },
+            Self::DH(dh_exchange) => { dh_exchange.write_to(buf) }
+        }
+    }
+}
+
+impl KeyExchange {
+    fn premaster_secret(&self) -> &MasterSecret {
+        match self {
+            Self::RSA(rsa_key_exchange) => { &rsa_key_exchange.premaster_secret },
+            Self::DH(dh_key_exchange) => { &dh_key_exchange.premaster_secret }
+        }
+    }
 }
 
 #[derive(Clone)]
@@ -772,6 +809,43 @@ impl BinarySerialisable for RSAKeyExchange {
     }
 }
 
+#[derive(Clone)]
+struct DHKeyExchange {
+    y_c: Huge,
+    premaster_secret: MasterSecret
+}
+
+impl DHKeyExchange {
+    fn new(server_dh_key: &DHKey) -> Self {
+        // TODO: make this random and much longer
+        let a = Huge::from(6u8);
+
+        let y_c = server_dh_key.g.clone().mod_pow(a.clone(), server_dh_key.p.clone());
+        let z = server_dh_key.y.clone().mod_pow(a, server_dh_key.p.clone());
+
+        // copy Z to front of new premaster secret buffer
+        let mut premaster_secret = [0u8; MASTER_SECRET_LENGTH];
+        &mut premaster_secret[0..z.bytes().len()].copy_from_slice(z.bytes());
+
+        Self { y_c, premaster_secret }
+    }
+}
+
+impl BinaryLength for DHKeyExchange {
+    fn binary_len(&self) -> usize {
+        // message is 2-byte length followed by the bytes of y_c
+        u16::fixed_binary_len() + self.y_c.bytes().len()
+    }
+}
+
+impl BinarySerialisable for DHKeyExchange {
+    fn write_to(&self, buf: &mut [u8]) {
+        let len = self.y_c.bytes().len() as u16;
+        let buf = write_front(&len, buf);
+        &mut buf[0..(len as usize)].copy_from_slice(self.y_c.bytes());
+    }
+}
+
 fn calculate_keys(parameters: &mut TLSParameters) {
     let suite = get_cipher_suite(parameters.pending_send_parameters.suite);
     let label = "key expansion".as_bytes();
@@ -802,23 +876,35 @@ fn send_client_key_exchange<W: Write>(dest: &mut W, parameters: &mut TLSParamete
             // server key should be RSA!
             match &parameters.server_public_key {
                 PublicKeyInfo::RSA(rsa_key) => {
-                    Ok(RSAKeyExchange::new(&TLS_VERSION, rsa_key))
+                    let rsa_exchange = RSAKeyExchange::new(&TLS_VERSION, rsa_key);
+                    Ok(KeyExchange::RSA(rsa_exchange))
                 },
                 _ => {
                     Err(TLSError::ProtocolError("Server requires RSA key exchange with non-RSA public key".to_owned()))
                 }
             }
         },
+        KeyExchangeMethod::DH => {
+            match &parameters.server_dh_key {
+                Some(dh_key) => {
+                    let dh_exchange = DHKeyExchange::new(dh_key);
+                    Ok(KeyExchange::DH(dh_exchange))
+                },
+                None => {
+                    Err(TLSError::ProtocolError("Cannot perform DH key exchange without server DH key".to_owned()))
+                }
+            }
+        }
         _ => {
             todo!()
         }
     }?;
 
-    send_handshake_message(dest, ClientHandshakeMessage::RSAKeyExchange(key_exchange_message.clone())).map_err(TLSError::IOError)?;
+    send_handshake_message(dest, ClientHandshakeMessage::KeyExchange(key_exchange_message.clone())).map_err(TLSError::IOError)?;
 
     // calculate the master secret from the premaster secret
     // the server side will perform the same calculation
-    compute_master_secret(key_exchange_message.premaster_secret.as_slice(), parameters);
+    compute_master_secret(key_exchange_message.premaster_secret().as_slice(), parameters);
 
     // TODO: purge the premaster secret from memory
     calculate_keys(parameters);

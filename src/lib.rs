@@ -19,4 +19,5 @@ pub mod pem;
 pub mod files;
 pub mod prf;
 pub mod tls;
+pub mod dh;
 
