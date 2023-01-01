@@ -6,7 +6,7 @@ use num_enum::{TryFromPrimitive};
 use std::net::{TcpStream};
 
 use crate::x509::{self, SignedX509Certificate, PublicKeyInfo};
-use crate::prf::prf;
+use crate::prf::{prf, prf_bytes};
 use crate::rsa::{self, RSAKey};
 
 trait BinaryLength {
@@ -151,6 +151,13 @@ enum CipherSuiteIdentifier {
     TLS_KRB5_EXPORT_WITH_RC2_CBC_40_MD5 = 0x002A,
     TLS_KRB5_EXPORT_WITH_RC4_40_MD5     = 0x002B,
 
+    // WARNING: the following are undefined i.e. do not correspond to a suite
+    // The values of this type are used to index the CIPHER_SUITES array so we need to define
+    // the values
+    TLS_UNDEF_1 = 0x002C,
+    TLS_UNDEF_2 = 0x002D,
+    TLS_UNDEF_3 = 0x002E,
+
     // TLS_AES ciphersuites - RFC 3268
     TLS_RSA_WITH_AES_128_CBC_SHA      = 0x002F,
     TLS_DH_DSS_WITH_AES_128_CBC_SHA   = 0x0030,
@@ -218,6 +225,85 @@ impl BinaryReadable for CipherSuiteIdentifier {
     }
 }
 
+struct CipherSuite {
+    id: CipherSuiteIdentifier,
+    block_size: usize,
+    hash_size: usize,
+    key_size: usize,
+    iv_size: usize
+}
+
+// TODO: get hash algorithm from id and move to method
+const MD5_BYTE_SIZE: usize = 16;
+const SHA1_BYTE_SIZE: usize = 20;
+
+const CIPHER_SUITES: [CipherSuite; 57] = [
+    CipherSuite { id: CipherSuiteIdentifier::TLS_NULL_WITH_NULL_NULL, block_size: 0, hash_size: 0, key_size: 0, iv_size: 0, },
+    CipherSuite { id: CipherSuiteIdentifier::TLS_RSA_WITH_NULL_MD5, block_size: 0, hash_size: 0, key_size: 0, iv_size: MD5_BYTE_SIZE },
+    CipherSuite { id: CipherSuiteIdentifier::TLS_RSA_WITH_NULL_SHA, block_size: 0, hash_size: 0, key_size: 0, iv_size: SHA1_BYTE_SIZE },
+    CipherSuite { id: CipherSuiteIdentifier::TLS_RSA_EXPORT_WITH_RC4_40_MD5, block_size: 0, hash_size: 0, key_size: 5, iv_size: MD5_BYTE_SIZE },
+    CipherSuite { id: CipherSuiteIdentifier::TLS_RSA_WITH_RC4_128_MD5, block_size: 0, hash_size: 0, key_size: 16, iv_size: MD5_BYTE_SIZE },
+    CipherSuite { id: CipherSuiteIdentifier::TLS_RSA_WITH_RC4_128_SHA, block_size: 0, hash_size: 0, key_size: 16, iv_size: SHA1_BYTE_SIZE },
+    CipherSuite { id: CipherSuiteIdentifier::TLS_RSA_EXPORT_WITH_RC2_CBC_40_MD5, block_size: 0, hash_size: 0, key_size: 0, iv_size: MD5_BYTE_SIZE },
+    CipherSuite { id: CipherSuiteIdentifier::TLS_RSA_WITH_IDEA_CBC_SHA, block_size: 0, hash_size: 0, key_size: 0, iv_size: SHA1_BYTE_SIZE },
+    CipherSuite { id: CipherSuiteIdentifier::TLS_RSA_EXPORT_WITH_DES40_CBC_SHA, block_size: 0, hash_size: 0, key_size: 0, iv_size: SHA1_BYTE_SIZE },
+    CipherSuite { id: CipherSuiteIdentifier::TLS_RSA_WITH_DES_CBC_SHA, block_size: 8, hash_size: 8, key_size: 8, iv_size: SHA1_BYTE_SIZE },
+    CipherSuite { id: CipherSuiteIdentifier::TLS_RSA_WITH_3DES_EDE_CBC_SHA, block_size: 8, hash_size: 8, key_size: 24, iv_size: SHA1_BYTE_SIZE },
+    CipherSuite { id: CipherSuiteIdentifier::TLS_DH_DSS_EXPORT_WITH_DES40_CBC_SHA, block_size: 0, hash_size: 0, key_size: 0, iv_size: SHA1_BYTE_SIZE },
+    CipherSuite { id: CipherSuiteIdentifier::TLS_DH_DSS_WITH_DES_CBC_SHA, block_size: 0, hash_size: 0, key_size: 0, iv_size: SHA1_BYTE_SIZE },
+    CipherSuite { id: CipherSuiteIdentifier::TLS_DH_DSS_WITH_3DES_EDE_CBC_SHA, block_size: 8, hash_size: 8, key_size: 24, iv_size: SHA1_BYTE_SIZE },
+    CipherSuite { id: CipherSuiteIdentifier::TLS_DH_RSA_EXPORT_WITH_DES40_CBC_SHA, block_size: 0, hash_size: 0, key_size: 0, iv_size: SHA1_BYTE_SIZE },
+    CipherSuite { id: CipherSuiteIdentifier::TLS_DH_RSA_WITH_DES_CBC_SHA, block_size: 0, hash_size: 0, key_size: 0, iv_size: SHA1_BYTE_SIZE },
+    CipherSuite { id: CipherSuiteIdentifier::TLS_DH_RSA_WITH_3DES_EDE_CBC_SHA, block_size: 0, hash_size: 0, key_size: 0, iv_size: SHA1_BYTE_SIZE },
+    CipherSuite { id: CipherSuiteIdentifier::TLS_DHE_DSS_EXPORT_WITH_DES40_CBC_SHA, block_size: 0, hash_size: 0, key_size: 0, iv_size: SHA1_BYTE_SIZE },
+    CipherSuite { id: CipherSuiteIdentifier::TLS_DHE_DSS_WITH_DES_CBC_SHA, block_size: 0, hash_size: 0, key_size: 0, iv_size: SHA1_BYTE_SIZE },
+    CipherSuite { id: CipherSuiteIdentifier::TLS_DHE_DSS_WITH_3DES_EDE_CBC_SHA, block_size: 0, hash_size: 0, key_size: 0, iv_size: SHA1_BYTE_SIZE },
+    CipherSuite { id: CipherSuiteIdentifier::TLS_DHE_RSA_EXPORT_WITH_DES40_CBC_SHA, block_size: 0, hash_size: 0, key_size: 0, iv_size: SHA1_BYTE_SIZE },
+    CipherSuite { id: CipherSuiteIdentifier::TLS_DHE_RSA_WITH_DES_CBC_SHA, block_size: 8, hash_size: 8, key_size: 8, iv_size: SHA1_BYTE_SIZE },
+    CipherSuite { id: CipherSuiteIdentifier::TLS_DHE_RSA_WITH_3DES_EDE_CBC_SHA, block_size: 0, hash_size: 0, key_size: 0, iv_size: SHA1_BYTE_SIZE },
+    CipherSuite { id: CipherSuiteIdentifier::TLS_DH_anon_EXPORT_WITH_RC4_40_MD5, block_size: 0, hash_size: 0, key_size: 0, iv_size: MD5_BYTE_SIZE },
+    CipherSuite { id: CipherSuiteIdentifier::TLS_DH_anon_WITH_RC4_128_MD5, block_size: 0, hash_size: 0, key_size: 0, iv_size: MD5_BYTE_SIZE },
+    CipherSuite { id: CipherSuiteIdentifier::TLS_DH_anon_EXPORT_WITH_DES40_CBC_SHA, block_size: 0, hash_size: 0, key_size: 0, iv_size: SHA1_BYTE_SIZE },
+    CipherSuite { id: CipherSuiteIdentifier::TLS_DH_anon_WITH_DES_CBC_SHA, block_size: 0, hash_size: 0, key_size: 0, iv_size: SHA1_BYTE_SIZE },
+    CipherSuite { id: CipherSuiteIdentifier::TLS_DH_anon_WITH_3DES_EDE_CBC_SHA, block_size: 0, hash_size: 0, key_size: 0, iv_size: SHA1_BYTE_SIZE },
+    CipherSuite { id: CipherSuiteIdentifier::TLS_KRB5_WITH_DES_CBC_SHA, block_size: 0, hash_size: 0, key_size: 0, iv_size: SHA1_BYTE_SIZE },
+    CipherSuite { id: CipherSuiteIdentifier::TLS_KRB5_WITH_3DES_EDE_CBC_SHA, block_size: 0, hash_size: 0, key_size: 0, iv_size: SHA1_BYTE_SIZE },
+    CipherSuite { id: CipherSuiteIdentifier::TLS_KRB5_WITH_RC4_128_SHA, block_size: 0, hash_size: 0, key_size: 0, iv_size: SHA1_BYTE_SIZE },
+    CipherSuite { id: CipherSuiteIdentifier::TLS_KRB5_WITH_IDEA_CBC_SHA, block_size: 0, hash_size: 0, key_size: 0, iv_size: SHA1_BYTE_SIZE },
+    CipherSuite { id: CipherSuiteIdentifier::TLS_KRB5_WITH_DES_CBC_MD5, block_size: 0, hash_size: 0, key_size: 0, iv_size: MD5_BYTE_SIZE },
+    CipherSuite { id: CipherSuiteIdentifier::TLS_KRB5_WITH_3DES_EDE_CBC_MD5, block_size: 0, hash_size: 0, key_size: 0, iv_size: MD5_BYTE_SIZE },
+    CipherSuite { id: CipherSuiteIdentifier::TLS_KRB5_WITH_RC4_128_MD5, block_size: 0, hash_size: 0, key_size: 0, iv_size: MD5_BYTE_SIZE },
+    CipherSuite { id: CipherSuiteIdentifier::TLS_KRB5_WITH_IDEA_CBC_MD5, block_size: 0, hash_size: 0, key_size: 0, iv_size: MD5_BYTE_SIZE },
+    CipherSuite { id: CipherSuiteIdentifier::TLS_KRB5_EXPORT_WITH_DES_CBC_40_SHA, block_size: 0, hash_size: 0, key_size: 0, iv_size: SHA1_BYTE_SIZE },
+    CipherSuite { id: CipherSuiteIdentifier::TLS_KRB5_EXPORT_WITH_RC2_CBC_40_SHA, block_size: 0, hash_size: 0, key_size: 0, iv_size: SHA1_BYTE_SIZE },
+    CipherSuite { id: CipherSuiteIdentifier::TLS_KRB5_EXPORT_WITH_RC4_40_SHA, block_size: 0, hash_size: 0, key_size: 0, iv_size: SHA1_BYTE_SIZE },
+    CipherSuite { id: CipherSuiteIdentifier::TLS_KRB5_EXPORT_WITH_DES_CBC_40_MD5, block_size: 0, hash_size: 0, key_size: 0, iv_size: MD5_BYTE_SIZE },
+    CipherSuite { id: CipherSuiteIdentifier::TLS_KRB5_EXPORT_WITH_RC2_CBC_40_MD5, block_size: 0, hash_size: 0, key_size: 0, iv_size: MD5_BYTE_SIZE },
+    CipherSuite { id: CipherSuiteIdentifier::TLS_KRB5_EXPORT_WITH_RC4_40_MD5, block_size: 0, hash_size: 0, key_size: 0, iv_size: MD5_BYTE_SIZE },
+
+    // XXX are these three defined?
+    CipherSuite { id: CipherSuiteIdentifier::TLS_UNDEF_1, block_size: 0, hash_size: 0, key_size: 0, iv_size: 0 },
+    CipherSuite { id: CipherSuiteIdentifier::TLS_UNDEF_2, block_size: 0, hash_size: 0, key_size: 0, iv_size: 0 },
+    CipherSuite { id: CipherSuiteIdentifier::TLS_UNDEF_3, block_size: 0, hash_size: 0, key_size: 0, iv_size: 0 },
+
+    CipherSuite { id: CipherSuiteIdentifier::TLS_RSA_WITH_AES_128_CBC_SHA, block_size: 16, hash_size: 16, key_size: 16, iv_size: SHA1_BYTE_SIZE },
+    CipherSuite { id: CipherSuiteIdentifier::TLS_DH_DSS_WITH_AES_128_CBC_SHA, block_size: 16, hash_size: 16, key_size: 16, iv_size: SHA1_BYTE_SIZE },
+    CipherSuite { id: CipherSuiteIdentifier::TLS_DH_RSA_WITH_AES_128_CBC_SHA, block_size: 16, hash_size: 16, key_size: 16, iv_size: SHA1_BYTE_SIZE },
+    CipherSuite { id: CipherSuiteIdentifier::TLS_DHE_DSS_WITH_AES_128_CBC_SHA, block_size: 16, hash_size: 16, key_size: 16, iv_size: SHA1_BYTE_SIZE },
+    CipherSuite { id: CipherSuiteIdentifier::TLS_DHE_RSA_WITH_AES_128_CBC_SHA, block_size: 16, hash_size: 16, key_size: 16, iv_size: SHA1_BYTE_SIZE },
+    CipherSuite { id: CipherSuiteIdentifier::TLS_DH_anon_WITH_AES_128_CBC_SHA, block_size: 16, hash_size: 16, key_size: 16, iv_size: SHA1_BYTE_SIZE },
+    CipherSuite { id: CipherSuiteIdentifier::TLS_RSA_WITH_AES_256_CBC_SHA, block_size: 16, hash_size: 16, key_size: 32, iv_size: SHA1_BYTE_SIZE },
+    CipherSuite { id: CipherSuiteIdentifier::TLS_DH_DSS_WITH_AES_256_CBC_SHA, block_size: 16, hash_size: 16, key_size: 32, iv_size: SHA1_BYTE_SIZE },
+    CipherSuite { id: CipherSuiteIdentifier::TLS_DH_RSA_WITH_AES_256_CBC_SHA, block_size: 16, hash_size: 16, key_size: 32, iv_size: SHA1_BYTE_SIZE },
+    CipherSuite { id: CipherSuiteIdentifier::TLS_DHE_DSS_WITH_AES_256_CBC_SHA, block_size: 16, hash_size: 16, key_size: 32, iv_size: SHA1_BYTE_SIZE },
+    CipherSuite { id: CipherSuiteIdentifier::TLS_DHE_RSA_WITH_AES_256_CBC_SHA, block_size: 16, hash_size: 16, key_size: 32, iv_size: SHA1_BYTE_SIZE },
+    CipherSuite { id: CipherSuiteIdentifier::TLS_DH_anon_WITH_AES_256_CBC_SHA, block_size: 16, hash_size: 16, key_size: 32, iv_size: SHA1_BYTE_SIZE },
+];
+
+fn get_cipher_suite(suite_id: CipherSuiteIdentifier) -> &'static CipherSuite {
+    &CIPHER_SUITES[suite_id as usize]
+}
+
 #[derive(Copy, Clone, PartialEq, Eq, Debug)]
 struct ProtocolVersion {
     major: u8,
@@ -254,6 +340,12 @@ const TLS_VERSION: ProtocolVersion = ProtocolVersion { major: 3, minor: 1 };
 #[derive(Clone)]
 struct Random {
     bytes: [u8; 32]
+}
+
+impl Random {
+    fn bytes(&self) -> &[u8] {
+        self.bytes.as_slice()
+    }
 }
 
 const MASTER_SECRET_LENGTH: usize = 48;
@@ -419,8 +511,19 @@ impl BinaryReadable for CompressionMethods {
 
 #[derive(Clone)]
 struct ProtectionParameters {
+    mac_secret: Vec<u8>,
+    key: Vec<u8>,
+    iv: Vec<u8>,
     suite: CipherSuiteIdentifier,
     seq_num: u64
+}
+
+impl ProtectionParameters {
+    fn set_secrets(&mut self, mac: &[u8], key: &[u8], iv: &[u8]) {
+        self.mac_secret = mac.to_vec();
+        self.key = key.to_vec();
+        self.iv = iv.to_vec();
+    }
 }
 
 #[derive(Clone)]
@@ -669,6 +772,30 @@ impl BinarySerialisable for RSAKeyExchange {
     }
 }
 
+fn calculate_keys(parameters: &mut TLSParameters) {
+    let suite = get_cipher_suite(parameters.pending_send_parameters.suite);
+    let label = "key expansion".as_bytes();
+    let key_block_length = suite.hash_size * 2 + suite.key_size * 2 + suite.iv_size * 2;
+
+    // seed is server random followed by client random
+    // NOTE: This is the opposite of compute_master_secret
+    let seed = [parameters.server_random.bytes(), parameters.client_random.bytes()].concat();
+
+    let key_bytes = prf_bytes(parameters.master_secret.as_slice(), label, seed.as_slice(), key_block_length);
+    let (send_mac, remaining) = key_bytes.split_at(suite.hash_size);
+    let (recv_mac, remaining) = remaining.split_at(suite.hash_size);
+    let (send_key, remaining) = remaining.split_at(suite.key_size);
+    let (recv_key, remaining) = remaining.split_at(suite.key_size);
+    let (send_iv, remaining) = remaining.split_at(suite.iv_size);
+    let (recv_iv, remaining) = remaining.split_at(suite.iv_size);
+
+    assert_eq!(0, remaining.len(), "Should consume all generated bytes");
+
+    // set mac/key/iv for send and receive parameters
+    parameters.pending_send_parameters.set_secrets(send_mac, send_key, send_iv);
+    parameters.pending_recv_parameters.set_secrets(recv_mac, recv_key, recv_iv);
+}
+
 fn send_client_key_exchange<W: Write>(dest: &mut W, parameters: &mut TLSParameters) -> Result<(), TLSError> {
     let key_exchange_message = match parameters.pending_send_parameters.suite.key_exchange_method() {
         KeyExchangeMethod::RSA => {
@@ -694,7 +821,7 @@ fn send_client_key_exchange<W: Write>(dest: &mut W, parameters: &mut TLSParamete
     compute_master_secret(key_exchange_message.premaster_secret.as_slice(), parameters);
 
     // TODO: purge the premaster secret from memory
-    // calculate_keys(parameters)
+    calculate_keys(parameters);
 
     Ok(())
 }
