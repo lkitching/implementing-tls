@@ -11,6 +11,9 @@ use crate::prf::{prf, prf_bytes};
 use crate::rsa::{self, RSAKey};
 use crate::dh::{DHKey};
 use crate::huge::{Huge};
+use crate::hash::{self, HashAlgorithm};
+use crate::md5::{MD5HashAlgorithm};
+use crate::sha::{SHA1HashAlgorithm};
 
 trait BinaryLength {
     fn binary_len(&self) -> usize;
@@ -551,17 +554,27 @@ struct TLSParameters {
     server_public_key: PublicKeyInfo,
     server_dh_key: Option<DHKey>,
 
+    md5_handshake_digest: <MD5HashAlgorithm as HashAlgorithm>::State,
+    sha1_handshake_digest: <SHA1HashAlgorithm as HashAlgorithm>::State,
+
     server_hello_done: bool
 }
 
 impl TLSParameters {
     fn init(&mut self) {
+        self.md5_handshake_digest = (MD5HashAlgorithm {}).initialise();
+        self.sha1_handshake_digest = (SHA1HashAlgorithm {}).initialise();
         todo!()
     }
 
     fn make_active(&mut self) {
         self.active_send_parameters = self.pending_send_parameters.clone();
         self.pending_send_parameters.init();
+    }
+
+    fn update_digests(&mut self, data: &[u8]) {
+        hash::update(data, &MD5HashAlgorithm {}, &mut self.md5_handshake_digest);
+        hash::update(data, &SHA1HashAlgorithm {}, &mut self.sha1_handshake_digest);
     }
 }
 
@@ -732,7 +745,7 @@ impl BinarySerialisable for ClientHandshakeMessage {
     }
 }
 
-fn send_client_hello<W: Write>(dest: &mut W, params: &TLSParameters) -> io::Result<()> {
+fn send_client_hello<W: Write>(dest: &mut W, params: &mut TLSParameters) -> io::Result<()> {
     let hello = ClientHello {
         client_version: TLS_VERSION,
         random: Random::from_now(&params.client_random),
@@ -741,7 +754,7 @@ fn send_client_hello<W: Write>(dest: &mut W, params: &TLSParameters) -> io::Resu
         cipher_suites: CipherSuites(vec![CipherSuiteIdentifier::TLS_RSA_WITH_3DES_EDE_CBC_SHA])
     };
 
-    send_handshake_message(dest, ClientHandshakeMessage::Hello(hello))
+    send_handshake_message(dest, ClientHandshakeMessage::Hello(hello), params)
 }
 
 enum KeyExchangeMethod {
@@ -913,7 +926,8 @@ fn send_client_key_exchange<W: Write>(dest: &mut W, parameters: &mut TLSParamete
         }
     }?;
 
-    send_handshake_message(dest, ClientHandshakeMessage::KeyExchange(key_exchange_message.clone())).map_err(TLSError::IOError)?;
+    let msg = ClientHandshakeMessage::KeyExchange(key_exchange_message.clone());
+    send_handshake_message(dest, msg, parameters).map_err(TLSError::IOError)?;
 
     // calculate the master secret from the premaster secret
     // the server side will perform the same calculation
@@ -925,13 +939,40 @@ fn send_client_key_exchange<W: Write>(dest: &mut W, parameters: &mut TLSParamete
     Ok(())
 }
 
-fn send_handshake_message<W: Write>(dest: &mut W, handshake_message: ClientHandshakeMessage) -> io::Result<()> {
-    // TODO: update handshake message digests
+struct TLSMessageBuffer {
+    version: ProtocolVersion,
+    message_type: ContentType,
+    data: Vec<u8>
+}
 
-    let msg = TLSPlaintext {
+impl BinaryLength for TLSMessageBuffer {
+    fn binary_len(&self) -> usize {
+        TLSHeader::fixed_binary_len() + self.data.len()
+    }
+}
+
+impl BinarySerialisable for TLSMessageBuffer {
+    fn write_to(&self, buf: &mut [u8]) {
+        let header = TLSHeader {
+            message_type: self.message_type,
+            version: self.version.clone(),
+            length: buf.len() as u16,
+        };
+        let buf = write_front(&header, buf);
+        buf[0..self.data.len()].copy_from_slice(self.data.as_slice());
+    }
+}
+
+fn send_handshake_message<W: Write>(dest: &mut W, handshake_message: ClientHandshakeMessage, parameters: &mut TLSParameters) -> io::Result<()> {
+    // serialise handshake message and use it to update the handshake digests
+    let message_buf = handshake_message.write_to_vec();
+    parameters.update_digests(message_buf.as_slice());
+
+    let msg = TLSMessageBuffer {
         // TODO: get from TLS parameters?
         version: TLS_VERSION,
-        message: handshake_message
+        message_type: handshake_message.get_content_type(),
+        data: message_buf
     };
 
     send_message(dest, msg)
@@ -1134,17 +1175,14 @@ impl <T: BinaryLength> BinaryLength for TLSPlaintext<T> {
 
 impl <T: TLSMessage + BinarySerialisable> BinarySerialisable for TLSPlaintext<T> {
     fn write_to(&self, buf: &mut [u8]) {
-        // write content type
-        let buf = write_front(&self.message.get_content_type(), buf);
+        let header = TLSHeader {
+            message_type: self.message.get_content_type(),
+            length: self.message.binary_len() as u16,
+            version: self.version.clone()
+        };
 
-        // get inner message
-        //let tmp = self.message.write_to_vec();
-
-        // write protocol version
-        let buf = write_front(&self.version, buf);
-
-        // write message length
-        let buf = write_front(&(self.message.binary_len() as u16), buf);
+        // write header
+        let buf = write_front(&header, buf);
 
         // write message
         self.message.write_to(buf);
@@ -1184,6 +1222,19 @@ struct TLSHeader {
 impl FixedBinaryLength for TLSHeader {
     fn fixed_binary_len() -> usize {
         ContentType::fixed_binary_len() + ProtocolVersion::fixed_binary_len() + u16::fixed_binary_len()
+    }
+}
+
+impl BinarySerialisable for TLSHeader {
+    fn write_to(&self, buf: &mut [u8]) {
+        // write content type
+        let buf = write_front(&self.message_type, buf);
+
+        // write protocol version
+        let buf = write_front(&self.version, buf);
+
+        // write message length
+        write_front(&self.length, buf);
     }
 }
 
@@ -1385,9 +1436,12 @@ fn read_seq<T: BinaryReadable>(buf: &[u8]) -> Result<Vec<T>, BinaryReadError> {
     Ok(result)
 }
 
-fn parse_server_message(header: &TLSHeader, buf: Vec<u8>) -> Result<ServerMessage, TLSError> {
+fn parse_server_message(header: &TLSHeader, buf: Vec<u8>, parameters: &mut TLSParameters) -> Result<ServerMessage, TLSError> {
     match header.message_type {
         ContentType::Handshake => {
+            // TODO: check this is valid!
+            // Need to update hash with each handshake message individually?
+            parameters.update_digests(buf.as_slice());
             read_seq(buf.as_slice())
                 .map(ServerMessage::Handshakes)
                 .map_err(TLSError::ParseError)
@@ -1422,7 +1476,7 @@ fn compute_master_secret(premaster_secret: &[u8], parameters: &mut TLSParameters
     parameters.master_secret = master_secret
 }
 
-fn receive_tls_msg(conn: &mut TcpStream) -> Result<ServerMessage, TLSError> {
+fn receive_tls_msg(conn: &mut TcpStream, parameters: &mut TLSParameters) -> Result<ServerMessage, TLSError> {
     // read TLS Record header
     let header_buf = read_exact(conn, TLSHeader::fixed_binary_len()).map_err(TLSError::IOError)?;
     let (tls_header, _) = TLSHeader::read_from(header_buf.as_slice()).map_err(TLSError::ParseError)?;
@@ -1430,7 +1484,7 @@ fn receive_tls_msg(conn: &mut TcpStream) -> Result<ServerMessage, TLSError> {
     // read message body
     match read_exact(conn, tls_header.length as usize) {
         Ok(message_buf) => {
-           parse_server_message(&tls_header, message_buf)
+           parse_server_message(&tls_header, message_buf, parameters)
         },
         Err(_) => {
             send_alert_message(conn, AlertDescription::IllegalParameter);
@@ -1451,12 +1505,12 @@ fn tls_connect(conn: &mut TcpStream, tls_params: &mut TLSParameters) -> Result<(
 
     // step 1
     // send the TLS handshake 'client hello' message
-    send_client_hello(conn, &tls_params).map_err(TLSError::IOError)?;
+    send_client_hello(conn, tls_params).map_err(TLSError::IOError)?;
 
     // step 2
     // receive the server hello response
     while !tls_params.server_hello_done {
-        match receive_tls_msg(conn)? {
+        match receive_tls_msg(conn, tls_params)? {
             ServerMessage::Handshakes(handshakes) => {
                 for handshake in handshakes {
                     match handshake {

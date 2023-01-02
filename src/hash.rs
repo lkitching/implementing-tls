@@ -10,6 +10,10 @@ pub trait HashAlgorithm {
     fn finalise(&self, final_block: &mut [u8], input_len_bytes: usize, state: Self::State) -> Vec<u8>;
 }
 
+pub fn update<H: HashAlgorithm>(bytes: &[u8], alg: &H, state: &mut H::State) {
+    todo!()
+}
+
 pub fn hash<R: io::Read, H: HashAlgorithm>(source: &mut R, alg: &H) -> io::Result<Vec<u8>> {
     let mut hash_state = alg.initialise();
     let mut buf = vec![0u8; alg.block_size()];
