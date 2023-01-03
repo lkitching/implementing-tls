@@ -576,6 +576,10 @@ impl TLSParameters {
         hash::update(data, &MD5HashAlgorithm {}, &mut self.md5_handshake_digest);
         hash::update(data, &SHA1HashAlgorithm {}, &mut self.sha1_handshake_digest);
     }
+
+    fn compute_handshake_hash(&self) -> Vec<u8> {
+        todo!()
+    }
 }
 
 #[derive(Debug, PartialEq, Eq, Clone, Copy, TryFromPrimitive)]
@@ -659,6 +663,32 @@ impl BinaryReadable for U24 {
     }
 }
 
+const VERIFY_DATA_LENGTH: usize = 12;
+type VerifyData = [u8; VERIFY_DATA_LENGTH];
+
+struct Finished {
+    verify_data: VerifyData
+}
+
+impl FixedBinaryLength for Finished {
+    fn fixed_binary_len() -> usize { VERIFY_DATA_LENGTH }
+}
+
+impl BinarySerialisable for Finished {
+    fn write_to(&self, buf: &mut [u8]) {
+        buf[0..VERIFY_DATA_LENGTH].copy_from_slice(self.verify_data.as_slice())
+    }
+}
+
+fn compute_verify_data(finished_label: &[u8], parameters: &TLSParameters) -> VerifyData {
+    let hashes = parameters.compute_handshake_hash();
+
+    let mut verify_data = [0u8; VERIFY_DATA_LENGTH];
+    prf(parameters.master_secret.as_slice(), finished_label, hashes.as_slice(), verify_data.as_mut_slice());
+
+    verify_data
+}
+
 struct HandshakeHeader {
     handshake_type: HandshakeType,
     length: U24
@@ -687,7 +717,8 @@ impl BinaryReadable for HandshakeHeader {
 
 enum ClientHandshakeMessage {
     Hello(ClientHello),
-    KeyExchange(KeyExchange)
+    KeyExchange(KeyExchange),
+    Finished(Finished)
 }
 
 impl ClientHandshakeMessage {
@@ -701,6 +732,10 @@ impl ClientHandshakeMessage {
             Self::KeyExchange(key_exchange) => {
                 let length = U24::try_from(key_exchange.binary_len()).expect("Message too large");
                 HandshakeHeader { handshake_type: HandshakeType::CLIENT_KEY_EXCHANGE, length }
+            },
+            Self::Finished(finished) => {
+                let length = U24::try_from(finished.binary_len()).expect("Message too large");
+                HandshakeHeader { handshake_type: HandshakeType::FINISHED, length }
             }
         }
     }
@@ -710,7 +745,8 @@ impl BinaryLength for ClientHandshakeMessage {
     fn binary_len(&self) -> usize {
         let message_len = match self {
             Self::Hello(hello) => hello.binary_len(),
-            Self::KeyExchange(rsa_key_exchange) => rsa_key_exchange.binary_len()
+            Self::KeyExchange(rsa_key_exchange) => rsa_key_exchange.binary_len(),
+            Self::Finished(finished) => finished.binary_len()
         };
         HandshakeHeader::fixed_binary_len() + message_len
     }
@@ -726,10 +762,13 @@ impl BinarySerialisable for ClientHandshakeMessage {
         // write message
         match self {
             Self::Hello(client_hello) => {
-                write_front(client_hello, buf)
+                client_hello.write_to(buf)
             },
             Self::KeyExchange(rsa_key_exchange) => {
-                write_front(rsa_key_exchange, buf)
+                rsa_key_exchange.write_to(buf)
+            },
+            Self::Finished(finished) => {
+                finished.write_to(buf);
             }
         };
     }
@@ -1407,6 +1446,13 @@ fn send_change_cipher_spec<W: Write>(conn: &mut W, parameters: &mut TLSParameter
     Ok(())
 }
 
+fn send_finished<W: Write>(conn: &mut W, parameters: &mut TLSParameters) -> Result<(), TLSError> {
+    let verify_data = compute_verify_data("client finished".as_bytes(), parameters);
+    let message = Finished { verify_data };
+    send_handshake_message(conn, ClientHandshakeMessage::Finished(message), parameters)
+        .map_err(TLSError::IOError)
+}
+
 enum ServerMessage {
     Alert(Alert),
     Handshakes(Vec<ServerHandshakeMessage>),
@@ -1536,5 +1582,6 @@ fn tls_connect(conn: &mut TcpStream, tls_params: &mut TLSParameters) -> Result<(
     // send 'change cipher spec' message
     send_change_cipher_spec(conn, tls_params)?;
 
+    send_finished(conn, tls_params)?;
     todo!()
 }
