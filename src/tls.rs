@@ -557,7 +557,8 @@ struct TLSParameters {
     md5_handshake_digest: <MD5HashAlgorithm as HashAlgorithm>::State,
     sha1_handshake_digest: <SHA1HashAlgorithm as HashAlgorithm>::State,
 
-    server_hello_done: bool
+    server_hello_done: bool,
+    server_finished: bool
 }
 
 impl TLSParameters {
@@ -677,6 +678,13 @@ impl FixedBinaryLength for Finished {
 impl BinarySerialisable for Finished {
     fn write_to(&self, buf: &mut [u8]) {
         buf[0..VERIFY_DATA_LENGTH].copy_from_slice(self.verify_data.as_slice())
+    }
+}
+
+impl BinaryReadable for Finished {
+    fn read_from(buf: &[u8]) -> Result<(Self, &[u8]), BinaryReadError> where Self: Sized {
+        let verify_data = buf[0..VERIFY_DATA_LENGTH].try_into().map_err(|_| BinaryReadError::BufferTooSmall)?;
+        Ok((Finished { verify_data }, &buf[VERIFY_DATA_LENGTH..]))
     }
 }
 
@@ -1378,7 +1386,8 @@ impl BinaryReadable for ServerCertificateChain {
 enum ServerHandshakeMessage {
     Hello(ServerHello),
     CertificateChain(ServerCertificateChain),
-    Done
+    Done,
+    Finished(Finished)
 }
 
 impl BinaryReadable for ServerHandshakeMessage {
@@ -1399,6 +1408,9 @@ impl BinaryReadable for ServerHandshakeMessage {
                 // 'server hello done' message contains no data
                 // TODO: check message_buf is empty?
                 Ok(ServerHandshakeMessage::Done)
+            },
+            HandshakeType::FINISHED => {
+                Finished::read_all_from(message_buf).map(ServerHandshakeMessage::Finished)
             }
             _ => Err(BinaryReadError::UnknownType)
         }?;
@@ -1560,6 +1572,9 @@ fn tls_connect(conn: &mut TcpStream, tls_params: &mut TLSParameters) -> Result<(
                         },
                         ServerHandshakeMessage::Done => {
                             tls_params.server_hello_done = true;
+                        },
+                        ServerHandshakeMessage::Finished(_finished) => {
+                            return Err(TLSError::ProtocolError("Unexpected server finished message before change cipher spec".to_owned()))
                         }
                     }
                 }
@@ -1583,5 +1598,35 @@ fn tls_connect(conn: &mut TcpStream, tls_params: &mut TLSParameters) -> Result<(
     send_change_cipher_spec(conn, tls_params)?;
 
     send_finished(conn, tls_params)?;
-    todo!()
+
+    // wait for server finished message
+    tls_params.server_finished = false;
+    while !tls_params.server_finished {
+        match receive_tls_msg(conn, tls_params)? {
+            ServerMessage::Handshakes(handshakes) => {
+                for handshake in handshakes {
+                    match handshake {
+                        ServerHandshakeMessage::Finished(finished) => {
+                            tls_params.server_finished = true;
+                            let expected_server_verify = compute_verify_data("server finished".as_bytes(), tls_params);
+
+                            if expected_server_verify != finished.verify_data {
+                                return Err(TLSError::ProtocolError("Server handshake verify data does not match expected value".to_owned()));
+                            }
+                        },
+                        _ => {
+                            // TODO: can handle?
+                            return Err(TLSError::ProtocolError("Unexpected handshake message while waiting for server finished message".to_owned()));
+                        }
+                    }
+                }
+            },
+            _ => {
+                // TODO: can handle?
+                return Err(TLSError::ProtocolError("Unexpected message while waiting for server finished message".to_owned()))
+            }
+        }
+    }
+
+    Ok(())
 }
