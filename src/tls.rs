@@ -612,16 +612,6 @@ impl BinaryReadable for HandshakeType {
     }
 }
 
-trait HandshakeMessage {
-    fn handshake_message_type(&self) -> HandshakeType;
-}
-
-impl HandshakeMessage for ClientHello {
-    fn handshake_message_type(&self) -> HandshakeType {
-        HandshakeType::CLIENT_HELLO
-    }
-}
-
 // Represents a 3-byte integer
 // This is used to encode the length of a Handshake message and the length of certificate chains
 // and their contained certificates
