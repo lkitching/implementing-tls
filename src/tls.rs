@@ -11,7 +11,7 @@ use crate::prf::{prf, prf_bytes};
 use crate::rsa::{self, RSAKey};
 use crate::dh::{DHKey};
 use crate::huge::{Huge};
-use crate::hash::{self, HashAlgorithm};
+use crate::hash::{self, HashAlgorithm, HashState};
 use crate::md5::{MD5HashAlgorithm};
 use crate::sha::{SHA1HashAlgorithm};
 
@@ -554,8 +554,8 @@ struct TLSParameters {
     server_public_key: PublicKeyInfo,
     server_dh_key: Option<DHKey>,
 
-    md5_handshake_digest: <MD5HashAlgorithm as HashAlgorithm>::State,
-    sha1_handshake_digest: <SHA1HashAlgorithm as HashAlgorithm>::State,
+    md5_handshake_digest: HashState,
+    sha1_handshake_digest: HashState,
 
     server_hello_done: bool,
     server_finished: bool

@@ -1,6 +1,6 @@
 use std::num::Wrapping;
 
-use crate::hash::{HashAlgorithm};
+use crate::hash::{HashAlgorithm, HashState};
 
 const SHA1_RESULT_SIZE: usize = 5;
 const SHA1_INPUT_BLOCK_SIZE: usize = 56;
@@ -25,7 +25,9 @@ fn maj(x: u32, y: u32, z: u32) -> u32 {
     (x & y) ^ (x & z) ^ (y & z)
 }
 
-fn sha1_block_operate(block: &[u8], hash: &mut [u32; SHA1_RESULT_SIZE]) {
+fn sha1_block_operate(block: &[u8], hash: &mut [u32]) {
+    assert_eq!(SHA1_RESULT_SIZE, hash.len(), "Unexpected state length");
+
     let mut W: [u32; 80] = [0; 80];
     for t in 0..80 {
         // first 16 blocks of W are the original 16 blocks of the input
@@ -141,12 +143,10 @@ fn write_final_block_length(final_block: &mut [u8], input_len_bytes: usize) {
 pub struct SHA1HashAlgorithm {}
 
 impl HashAlgorithm for SHA1HashAlgorithm {
-    type State = [u32; SHA1_RESULT_SIZE];
-
     fn output_length_bytes(&self) -> usize { 20 }
 
-    fn initialise(&self) -> Self::State {
-        SHA1_INITIAL_HASH.clone()
+    fn initialise(&self) -> HashState {
+        HashState::new(SHA1_INITIAL_HASH.as_slice())
     }
 
     fn block_size(&self) -> usize {
@@ -157,16 +157,16 @@ impl HashAlgorithm for SHA1HashAlgorithm {
         SHA1_INPUT_BLOCK_SIZE
     }
 
-    fn block_operate(&self, block: &[u8], state: &mut Self::State) {
-        sha1_block_operate(block, state);
+    fn block_operate(&self, block: &[u8], state: &mut HashState) {
+        sha1_block_operate(block, state.as_mut_slice());
     }
 
-    fn finalise(&self, final_block: &mut [u8], input_len_bytes: usize, mut state: Self::State) -> Vec<u8> {
+    fn finalise(&self, final_block: &mut [u8], input_len_bytes: usize, mut state: HashState) -> Vec<u8> {
         write_final_block_length(final_block, input_len_bytes);
 
-        sha1_block_operate(&final_block, &mut state);
+        sha1_block_operate(&final_block, state.as_mut_slice());
 
-        sha_hash_bytes(&state)
+        state.get_be_bytes()
     }
 }
 
@@ -211,19 +211,9 @@ fn sigma_shr(x: u32, i: bool) -> u32 {
     rotr(x, if i { 17 } else { 7 }) ^ rotr(x, if i { 19 } else { 18 }) ^ shr(x, if i { 10 } else { 3 })
 }
 
-fn sha_hash_bytes(state: &[u32]) -> Vec<u8> {
-    let mut bytes = vec![0; state.len() * 4];
+fn sha256_block_operate(block: &[u8], state: &mut [u32]) {
+    assert_eq!(8, state.len(), "Unexpected state length");
 
-    for i in 0..state.len() {
-        let be_bytes = state[i].to_be_bytes();
-        let offset = i * 4;
-        bytes[offset..offset + 4].copy_from_slice(&be_bytes);
-    }
-
-    bytes
-}
-
-fn sha256_block_operate(block: &[u8], state: &mut [u32; 8]) {
     let mut W: [u32; 64] = [0; 64];
 
     for t in 0..W.len() {
@@ -273,12 +263,10 @@ fn sha256_block_operate(block: &[u8], state: &mut [u32; 8]) {
 pub struct SHA256HashAlgorithm {}
 
 impl HashAlgorithm for SHA256HashAlgorithm {
-    type State = [u32; 8];
-
     fn output_length_bytes(&self) -> usize { 32 }
 
-    fn initialise(&self) -> Self::State {
-        SHA256_INITIAL_HASH.clone()
+    fn initialise(&self) -> HashState {
+        HashState::new(SHA256_INITIAL_HASH.as_slice())
     }
 
     fn block_size(&self) -> usize {
@@ -289,16 +277,16 @@ impl HashAlgorithm for SHA256HashAlgorithm {
         SHA1_INPUT_BLOCK_SIZE
     }
 
-    fn block_operate(&self, block: &[u8], state: &mut Self::State) {
-        sha256_block_operate(block, state);
+    fn block_operate(&self, block: &[u8], state: &mut HashState) {
+        sha256_block_operate(block, state.as_mut_slice());
     }
 
-    fn finalise(&self, final_block: &mut [u8], input_len_bytes: usize, mut state: Self::State) -> Vec<u8> {
+    fn finalise(&self, final_block: &mut [u8], input_len_bytes: usize, mut state: HashState) -> Vec<u8> {
         write_final_block_length(final_block, input_len_bytes);
 
-        sha256_block_operate(&final_block, &mut state);
+        sha256_block_operate(&final_block, state.as_mut_slice());
 
-        sha_hash_bytes(&state)
+        state.get_be_bytes()
     }
 }
 
@@ -314,7 +302,7 @@ mod test {
     #[test]
     fn empty_test() {
         let hash = sha1_hash(&[]);
-        let hash_bytes = sha_hash_bytes(&hash);
+        let hash_bytes = HashState::new(&hash).get_be_bytes();
         let expected = hex::read_bytes("0xda39a3ee5e6b4b0d3255bfef95601890afd80709").expect("Failed to parse hex");
 
         assert_eq!(&expected, &hash_bytes);
@@ -323,7 +311,7 @@ mod test {
     #[test]
     fn book_test() {
         let hash = sha1_hash("abc".as_bytes());
-        let hash_bytes = sha_hash_bytes(&hash);
+        let hash_bytes = HashState::new(&hash).get_be_bytes();
         let expected = hex::read_bytes("0xa9993e364706816aba3e25717850c26c9cd0d89d").expect("Failed to parse hex");
 
         assert_eq!(&expected, &hash_bytes);

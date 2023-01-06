@@ -2,6 +2,8 @@ use std::{env, process, io};
 
 use implementing_tls::{md5, hex, sha};
 use implementing_tls::hash::{HashAlgorithm, hash};
+use implementing_tls::md5::MD5HashAlgorithm;
+use implementing_tls::sha::{SHA1HashAlgorithm, SHA256HashAlgorithm};
 
 fn main() {
     let args: Vec<String> = env::args().collect();
@@ -30,5 +32,18 @@ fn main() {
         }
     };
 
+    let comp_bytes = {
+        let mut c = io::Cursor::new(bytes.to_vec());
+        match args[1].as_str() {
+            "-md5" => implementing_tls::hash::hash_digest(&mut c, MD5HashAlgorithm {}),
+            "-sha1" => implementing_tls::hash::hash_digest(&mut c, SHA1HashAlgorithm {}),
+            "-sha256" => implementing_tls::hash::hash_digest(&mut c, SHA256HashAlgorithm {}),
+            _ => {
+                panic!("INVALID!!!1")
+            }
+        }.expect("Failed to hash")
+    };
+
     hex::show_hex(&hash_bytes);
+    hex::show_hex(&comp_bytes);
 }

@@ -1,6 +1,6 @@
 use std::convert::{TryInto};
 use std::num::Wrapping;
-use crate::hash::HashAlgorithm;
+use crate::hash::{HashAlgorithm, HashState};
 
 #[allow(non_snake_case)]
 fn F(x: u32, y: u32, z: u32) -> u32 {
@@ -46,7 +46,7 @@ fn ROUND(f: fn (u32, u32, u32) -> u32, a: &mut u32, b: u32, c: u32, d: u32, k: u
     *a = tmp.0;
 }
 
-fn md5_block_operate(input: &[u8], hash: &mut [u32; MD5_RESULT_SIZE]) {
+fn md5_block_operate(input: &[u8], hash: &mut [u32]) {
     assert_eq!(64, input.len(), "Expected input block length of 64 bytes");
 
     let mut a = hash[0];
@@ -249,27 +249,13 @@ pub fn md5_hash(input: &[u8]) -> [u32; MD5_RESULT_SIZE] {
     hash
 }
 
-pub fn md5_hash_bytes(result: [u32; MD5_RESULT_SIZE]) -> [u8; 16] {
-    let mut output = [0; 16];
-
-    for i in 0..result.len() {
-        let le_bytes = result[i].to_le_bytes();
-        let offset = i * 4;
-        output[offset..offset + 4].copy_from_slice(&le_bytes);
-    }
-
-    output
-}
-
 pub struct MD5HashAlgorithm {}
 
 impl HashAlgorithm for MD5HashAlgorithm {
-    type State = [u32; MD5_RESULT_SIZE];
-
     fn output_length_bytes(&self) -> usize { 16 }
 
-    fn initialise(&self) -> Self::State {
-        MD5_INITIAL_HASH
+    fn initialise(&self) -> HashState {
+        HashState::new(MD5_INITIAL_HASH.as_slice())
     }
 
     fn block_size(&self) -> usize {
@@ -280,11 +266,11 @@ impl HashAlgorithm for MD5HashAlgorithm {
         MD5_INPUT_BLOCK_SIZE
     }
 
-    fn block_operate(&self, block: &[u8], state: &mut Self::State) {
-        md5_block_operate(block, state);
+    fn block_operate(&self, block: &[u8], state: &mut HashState) {
+        md5_block_operate(block, state.as_mut_slice());
     }
 
-    fn finalise(&self, final_block: &mut [u8], input_len_bytes: usize, mut state: Self::State) -> Vec<u8> {
+    fn finalise(&self, final_block: &mut [u8], input_len_bytes: usize, mut state: HashState) -> Vec<u8> {
         let length_in_bits = input_len_bytes * 8;
 
         // add length to end of last block
@@ -295,10 +281,11 @@ impl HashAlgorithm for MD5HashAlgorithm {
         final_block[MD5_BLOCK_SIZE - 7] = ((length_in_bits & 0x0000FF00) >> 8) as u8;
         final_block[MD5_BLOCK_SIZE - 8] = (length_in_bits & 0x000000FF) as u8;
 
-        md5_block_operate(final_block, &mut state);
+        md5_block_operate(final_block, state.as_mut_slice());
 
-        let hash_bytes = md5_hash_bytes(state);
-        hash_bytes.to_vec()
+        state.get_le_bytes()
+        // let hash_bytes = md5_hash_bytes(state.as_slice());
+        // hash_bytes.to_vec()
     }
 }
 
@@ -313,7 +300,7 @@ mod test {
     #[test]
     fn empty_test() {
         let result = md5_hash(&[]);
-        let bytes = md5_hash_bytes(result);
+        let bytes = HashState::new(&result).get_le_bytes();
 
         let expected = hex::read_bytes("0xd41d8cd98f00b204e9800998ecf8427e").expect("Failed to parse hex");
         assert_eq!(&expected, bytes.as_slice());
@@ -333,7 +320,7 @@ mod test {
     #[test]
     fn book_test() {
         let result = md5_hash("abc".as_bytes());
-        let bytes = md5_hash_bytes(result);
+        let bytes = HashState::new(&result).get_le_bytes();
 
         let expected = hex::read_bytes("0x900150983cd24fb0d6963f7d28e17f72").expect("Failed to parse hex");
         assert_eq!(&expected, bytes.as_slice());

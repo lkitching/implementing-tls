@@ -1,17 +1,185 @@
 use std::io;
+use std::cmp::{Ordering};
 
-pub trait HashAlgorithm {
-    type State;
-    fn output_length_bytes(&self) -> usize;
-    fn initialise(&self) -> Self::State;
-    fn block_size(&self) -> usize;
-    fn input_block_size(&self) -> usize;
-    fn block_operate(&self, block: &[u8], state: &mut Self::State);
-    fn finalise(&self, final_block: &mut [u8], input_len_bytes: usize, state: Self::State) -> Vec<u8>;
+#[derive(Clone)]
+pub struct HashState {
+    state: Vec<u32>
 }
 
-pub fn update<H: HashAlgorithm>(bytes: &[u8], alg: &H, state: &mut H::State) {
+impl HashState {
+    pub fn new(initial: &[u32]) -> Self {
+        Self { state: initial.to_vec() }
+    }
+
+    pub fn as_slice(&self) -> &[u32] {
+        self.state.as_slice()
+    }
+
+    pub fn as_mut_slice(&mut self) -> &mut [u32] {
+        self.state.as_mut_slice()
+    }
+
+    pub fn get_be_bytes(&self) -> Vec<u8> {
+        let mut bytes = vec![0; self.state.len() * 4];
+
+        for i in 0..self.state.len() {
+            let be_bytes = self.state[i].to_be_bytes();
+            let offset = i * 4;
+            bytes[offset..offset + 4].copy_from_slice(&be_bytes);
+        }
+
+        bytes
+    }
+
+    pub fn get_le_bytes(&self) -> Vec<u8> {
+        let mut output = vec![0; self.state.len() * 4];
+
+        for i in 0..self.state.len() {
+            let le_bytes = self.state[i].to_le_bytes();
+            let offset = i * 4;
+            output[offset..offset + 4].copy_from_slice(&le_bytes);
+        }
+
+        output
+    }
+}
+
+pub trait HashAlgorithm {
+    fn output_length_bytes(&self) -> usize;
+    fn initialise(&self) -> HashState;
+    fn block_size(&self) -> usize;
+    fn input_block_size(&self) -> usize;
+    fn block_operate(&self, block: &[u8], state: &mut HashState);
+    fn finalise(&self, final_block: &mut [u8], input_len_bytes: usize, state: HashState) -> Vec<u8>;
+}
+
+pub struct BlockBuffer {
+    buf: Vec<u8>,
+    position: usize,
+    total_bytes: usize
+}
+
+enum BufferResult {
+    Partial,
+    Filled(Vec<u8>)
+}
+
+impl BlockBuffer {
+    fn new(size: usize) -> Self {
+        Self {
+            buf: vec![0; size],
+            position: 0,
+            total_bytes: 0
+        }
+    }
+
+    fn buffer_full(&mut self) -> Vec<u8> {
+        self.position = 0;
+        let buf_len = self.buf.len();
+        std::mem::replace(&mut self.buf, vec![0; buf_len])
+    }
+
+    fn update<'a, 'b>(&'a mut self, bytes: &'b [u8]) -> (BufferResult, &'b [u8]) {
+        let capacity = self.buf.len() - self.position;
+
+        match capacity.cmp(&bytes.len()) {
+            Ordering::Less => {
+                // consume as many bytes required to fill buffer
+                &mut self.buf[self.position..].copy_from_slice(&bytes[0..capacity]);
+                self.total_bytes += capacity;
+                let block = self.buffer_full();
+                (BufferResult::Filled(block), &bytes[capacity..])
+            },
+            Ordering::Equal => {
+                // consume all bytes and fill buffer
+                &mut self.buf[self.position..].copy_from_slice(&bytes);
+                self.total_bytes += bytes.len();
+                let block = self.buffer_full();
+                (BufferResult::Filled(block), &[])
+            },
+            Ordering::Greater => {
+                // consume all bytes - buffer still has space capacity
+                let next_pos = self.position + bytes.len();
+                &mut self.buf[self.position..next_pos].copy_from_slice(&bytes);
+                self.total_bytes += bytes.len();
+                self.position = next_pos;
+                (BufferResult::Partial, &[])
+            }
+        }
+    }
+
+    fn consume(self) -> (Vec<u8>, usize, usize) {
+        (self.buf, self.position, self.total_bytes)
+    }
+}
+
+pub struct Digest<H> {
+    alg: H,
+    state: HashState,
+    buf: BlockBuffer
+}
+
+impl <H: HashAlgorithm> Digest<H> {
+    pub fn new(alg: H) -> Self {
+        let state = alg.initialise();
+        let buf = BlockBuffer::new(alg.block_size());
+        Self { alg, state, buf }
+    }
+
+    pub fn update(&mut self, bytes: &[u8]) {
+        let mut remaining = bytes;
+        while ! remaining.is_empty() {
+            let (result, left) = self.buf.update(remaining);
+            remaining = left;
+            if let BufferResult::Filled(block) = result {
+                self.alg.block_operate(&block, &mut self.state)
+            }
+        }
+    }
+
+    pub fn finalise(mut self) -> Vec<u8> {
+        let (mut buf, position, bytes_written) = self.buf.consume();
+
+        // set remaining space in buffer to [0x80, 0...]
+        buf[position] = 0x80;
+        for idx in (position + 1)..buf.len() {
+            buf[idx] = 0;
+        }
+
+        // see if there is space at the end of the current buffer to contain the length
+        if position < self.alg.input_block_size() {
+            // enough space to fit length
+            self.alg.finalise(buf.as_mut_slice(), bytes_written, self.state)
+        } else {
+            // not enough space to fit length at the end of the current block
+            // update with current padded block and then finalise with block containing 0s
+            self.alg.block_operate(buf.as_slice(), &mut self.state);
+
+            let mut padding = vec![0u8; self.alg.block_size()];
+            self.alg.finalise(padding.as_mut_slice(), bytes_written, self.state)
+
+        }
+    }
+}
+
+pub fn update<H: HashAlgorithm>(bytes: &[u8], alg: &H, state: &mut HashState) {
     todo!()
+}
+
+pub fn hash_digest<R: io::Read, H: HashAlgorithm>(source: &mut R, alg: H) -> io::Result<Vec<u8>> {
+    let mut buf = vec![0u8; alg.block_size()];
+    let mut digest = Digest::new(alg);
+
+    loop {
+        let last_read = source.read(buf.as_mut_slice())?;
+        if last_read == 0 {
+            break;
+        } else {
+            digest.update(&buf[0..last_read]);
+        }
+    }
+
+    Ok(digest.finalise())
 }
 
 pub fn hash<R: io::Read, H: HashAlgorithm>(source: &mut R, alg: &H) -> io::Result<Vec<u8>> {
@@ -70,4 +238,3 @@ pub fn hash<R: io::Read, H: HashAlgorithm>(source: &mut R, alg: &H) -> io::Resul
     let hash_bytes = alg.finalise(&mut padded_block, total_bytes_read, hash_state);
     Ok(hash_bytes)
 }
-
