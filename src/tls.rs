@@ -11,7 +11,7 @@ use crate::prf::{prf, prf_bytes};
 use crate::rsa::{self, RSAKey};
 use crate::dh::{DHKey};
 use crate::huge::{Huge};
-use crate::hash::{self, HashAlgorithm, HashState};
+use crate::hash::{self, HashAlgorithm, HashState, Digest};
 use crate::md5::{MD5HashAlgorithm};
 use crate::sha::{SHA1HashAlgorithm};
 
@@ -554,8 +554,8 @@ struct TLSParameters {
     server_public_key: PublicKeyInfo,
     server_dh_key: Option<DHKey>,
 
-    md5_handshake_digest: HashState,
-    sha1_handshake_digest: HashState,
+    md5_handshake_digest: Digest<MD5HashAlgorithm>,
+    sha1_handshake_digest: Digest<SHA1HashAlgorithm>,
 
     server_hello_done: bool,
     server_finished: bool
@@ -563,8 +563,8 @@ struct TLSParameters {
 
 impl TLSParameters {
     fn init(&mut self) {
-        self.md5_handshake_digest = (MD5HashAlgorithm {}).initialise();
-        self.sha1_handshake_digest = (SHA1HashAlgorithm {}).initialise();
+        self.md5_handshake_digest = Digest::new(MD5HashAlgorithm {});
+        self.sha1_handshake_digest = Digest::new(SHA1HashAlgorithm {});
         todo!()
     }
 
@@ -574,8 +574,8 @@ impl TLSParameters {
     }
 
     fn update_digests(&mut self, data: &[u8]) {
-        hash::update(data, &MD5HashAlgorithm {}, &mut self.md5_handshake_digest);
-        hash::update(data, &SHA1HashAlgorithm {}, &mut self.sha1_handshake_digest);
+        self.md5_handshake_digest.update(data);
+        self.sha1_handshake_digest.update(data);
     }
 
     fn compute_handshake_hash(&self) -> Vec<u8> {

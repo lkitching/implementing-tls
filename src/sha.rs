@@ -140,6 +140,7 @@ fn write_final_block_length(final_block: &mut [u8], input_len_bytes: usize) {
     final_block[SHA1_BLOCK_SIZE - 1] = (length_in_bits & 0x000000FF) as u8;
 }
 
+#[derive(Clone)]
 pub struct SHA1HashAlgorithm {}
 
 impl HashAlgorithm for SHA1HashAlgorithm {
@@ -260,6 +261,7 @@ fn sha256_block_operate(block: &[u8], state: &mut [u32]) {
     state[7] = (Wrapping(h) + Wrapping(state[7])).0;
 }
 
+#[derive(Clone)]
 pub struct SHA256HashAlgorithm {}
 
 impl HashAlgorithm for SHA256HashAlgorithm {

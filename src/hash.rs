@@ -53,6 +53,7 @@ pub trait HashAlgorithm {
     fn finalise(&self, final_block: &mut [u8], input_len_bytes: usize, state: HashState) -> Vec<u8>;
 }
 
+#[derive(Clone)]
 pub struct BlockBuffer {
     buf: Vec<u8>,
     position: usize,
@@ -113,6 +114,7 @@ impl BlockBuffer {
     }
 }
 
+#[derive(Clone)]
 pub struct Digest<H> {
     alg: H,
     state: HashState,
@@ -160,10 +162,6 @@ impl <H: HashAlgorithm> Digest<H> {
 
         }
     }
-}
-
-pub fn update<H: HashAlgorithm>(bytes: &[u8], alg: &H, state: &mut HashState) {
-    todo!()
 }
 
 pub fn hash_digest<R: io::Read, H: HashAlgorithm>(source: &mut R, alg: H) -> io::Result<Vec<u8>> {

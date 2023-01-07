@@ -249,6 +249,7 @@ pub fn md5_hash(input: &[u8]) -> [u32; MD5_RESULT_SIZE] {
     hash
 }
 
+#[derive(Clone)]
 pub struct MD5HashAlgorithm {}
 
 impl HashAlgorithm for MD5HashAlgorithm {
