@@ -579,7 +579,7 @@ impl TLSParameters {
     }
 
     fn compute_handshake_hash(&self) -> Vec<u8> {
-        todo!()
+        [self.md5_handshake_digest.clone().finalise(), self.sha1_handshake_digest.clone().finalise()].concat()
     }
 }
 
