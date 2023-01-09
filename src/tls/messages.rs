@@ -286,6 +286,10 @@ impl BinarySerialisable for ClientHello {
     }
 }
 
+impl ClientHandshakeMessage for ClientHello {
+    fn get_client_handshake_type(&self) -> HandshakeType { HandshakeType::CLIENT_HELLO }
+}
+
 #[derive(Debug, PartialEq, Eq, Clone, Copy, TryFromPrimitive)]
 #[repr(u8)]
 #[allow(non_camel_case_types)]
@@ -391,6 +395,10 @@ impl BinaryReadable for Finished {
     }
 }
 
+impl ClientHandshakeMessage for Finished {
+    fn get_client_handshake_type(&self) -> HandshakeType { HandshakeType::FINISHED }
+}
+
 pub struct HandshakeHeader {
     pub handshake_type: HandshakeType,
     pub length: U24
@@ -414,6 +422,36 @@ impl BinaryReadable for HandshakeHeader {
         let (handshake_type, buf) = HandshakeType::read_from(buf)?;
         let (length, buf) = U24::read_from(buf)?;
         Ok((HandshakeHeader { handshake_type, length }, buf))
+    }
+}
+
+pub trait ClientHandshakeMessage {
+    fn get_client_handshake_type(&self) -> HandshakeType;
+}
+
+pub struct HandshakeMessage<'a, T> {
+    pub message: &'a T
+}
+
+impl <'a, T> TLSMessage for HandshakeMessage<'a, T> {
+    fn get_content_type(&self) -> ContentType { ContentType::Handshake }
+}
+
+impl <'a, T: BinaryLength> BinaryLength for HandshakeMessage<'a, T> {
+    fn binary_len(&self) -> usize {
+        HandshakeHeader::fixed_binary_len() + self.binary_len()
+    }
+}
+
+impl <'a, T: BinarySerialisable + ClientHandshakeMessage> BinarySerialisable for HandshakeMessage<'a, T> {
+    fn write_to(&self, buf: &mut [u8]) {
+        let length = U24::try_from(self.message.binary_len()).expect("Message too large");
+        let header = HandshakeHeader {
+            handshake_type: self.message.get_client_handshake_type(),
+            length
+        };
+        let buf = write_front(&header, buf);
+        self.message.write_to(buf);
     }
 }
 
@@ -521,6 +559,9 @@ pub struct TLSHeader {
 
 impl FixedBinaryLength for TLSHeader {
     fn fixed_binary_len() -> usize {
+        // 1 byte for message type
+        // 2 bytes for protocol version
+        // 2 bytes for length
         ContentType::fixed_binary_len() + ProtocolVersion::fixed_binary_len() + u16::fixed_binary_len()
     }
 }
