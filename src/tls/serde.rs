@@ -180,7 +180,8 @@ impl FixedBinaryLength for u64 {
 
 impl BinarySerialisable for u64 {
     fn write_to(&self, buf: &mut [u8]) {
-        todo!()
+        let bytes = self.to_be_bytes();
+        buf.copy_from_slice(bytes.as_slice());
     }
 }
 
