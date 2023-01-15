@@ -114,7 +114,8 @@ pub enum CipherSuiteIdentifier {
 pub enum KeyExchangeMethod {
     RSA,
     DH,
-    None
+    None,
+    Unsupported
 }
 
 impl CipherSuiteIdentifier {
@@ -137,8 +138,37 @@ impl CipherSuiteIdentifier {
             Self::TLS_RSA_WITH_AES_256_CBC_SHA => {
                 KeyExchangeMethod::RSA
             },
-            _ => {
+            Self::TLS_DH_DSS_EXPORT_WITH_DES40_CBC_SHA |
+            Self::TLS_DH_DSS_WITH_DES_CBC_SHA |
+            Self::TLS_DH_DSS_WITH_3DES_EDE_CBC_SHA |
+            Self::TLS_DH_RSA_EXPORT_WITH_DES40_CBC_SHA |
+            Self::TLS_DH_RSA_WITH_DES_CBC_SHA |
+            Self::TLS_DH_RSA_WITH_3DES_EDE_CBC_SHA |
+            Self::TLS_DHE_DSS_EXPORT_WITH_DES40_CBC_SHA |
+            Self::TLS_DHE_DSS_WITH_DES_CBC_SHA |
+            Self::TLS_DHE_DSS_WITH_3DES_EDE_CBC_SHA |
+            Self::TLS_DHE_RSA_EXPORT_WITH_DES40_CBC_SHA |
+            Self::TLS_DHE_RSA_WITH_DES_CBC_SHA |
+            Self::TLS_DHE_RSA_WITH_3DES_EDE_CBC_SHA |
+            Self::TLS_DH_anon_EXPORT_WITH_RC4_40_MD5 |
+            Self::TLS_DH_anon_WITH_RC4_128_MD5 |
+            Self::TLS_DH_anon_EXPORT_WITH_DES40_CBC_SHA |
+            Self::TLS_DH_anon_WITH_DES_CBC_SHA |
+            Self::TLS_DH_anon_WITH_3DES_EDE_CBC_SHA |
+            Self::TLS_DH_DSS_WITH_AES_128_CBC_SHA |
+            Self::TLS_DH_RSA_WITH_AES_128_CBC_SHA |
+            Self::TLS_DHE_DSS_WITH_AES_128_CBC_SHA |
+            Self::TLS_DHE_RSA_WITH_AES_128_CBC_SHA |
+            Self::TLS_DH_anon_WITH_AES_128_CBC_SHA |
+            Self::TLS_DH_DSS_WITH_AES_256_CBC_SHA |
+            Self::TLS_DH_RSA_WITH_AES_256_CBC_SHA |
+            Self::TLS_DHE_DSS_WITH_AES_256_CBC_SHA |
+            Self::TLS_DHE_RSA_WITH_AES_256_CBC_SHA |
+            Self::TLS_DH_anon_WITH_AES_256_CBC_SHA => {
                 KeyExchangeMethod::DH
+            }
+            _ => {
+                KeyExchangeMethod::Unsupported
             }
         }
     }

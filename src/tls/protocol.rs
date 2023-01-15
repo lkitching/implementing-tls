@@ -168,9 +168,13 @@ fn send_client_key_exchange<W: Write>(dest: &mut W, parameters: &mut TLSParamete
                     Err(TLSError::ProtocolError("Cannot perform DH key exchange without server DH key".to_owned()))
                 }
             }
+        },
+        KeyExchangeMethod::None => {
+            // TODO: don't call if no key exchange method?
+            return Ok(());
         }
-        _ => {
-            todo!()
+        KeyExchangeMethod::Unsupported => {
+            Err(TLSError::ProtocolError("Unsupported key exchange method".to_owned()))
         }
     }?;
 
