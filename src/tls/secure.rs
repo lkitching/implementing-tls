@@ -1,11 +1,26 @@
 use super::messages::*;
+use crate::hash::{HashAlgorithm};
 
 pub struct CipherSuite {
     id: CipherSuiteIdentifier,
-    block_size: usize,
+    pub block_size: usize,
     pub hash_size: usize,
     pub key_size: usize,
     pub iv_size: usize
+}
+
+impl CipherSuite {
+    pub fn has_digest(&self) -> bool {
+        todo!()
+    }
+
+    pub fn has_encryption(&self) -> bool {
+        todo!()
+    }
+
+    pub fn bulk_encrypt(&self, plaintext: &[u8], iv: &[u8], key: &[u8], ciphertext_buf: &mut [u8]) {
+        todo!()
+    }
 }
 
 // TODO: get hash algorithm from id and move to method
@@ -81,7 +96,7 @@ pub fn get_cipher_suite(suite_id: CipherSuiteIdentifier) -> &'static CipherSuite
 
 #[derive(Clone)]
 pub struct ProtectionParameters {
-    mac_secret: Vec<u8>,
+    pub mac_secret: Vec<u8>,
     key: Vec<u8>,
     iv: Vec<u8>,
     pub suite: CipherSuiteIdentifier,
@@ -101,5 +116,29 @@ impl ProtectionParameters {
         self.mac_secret = Vec::new();
         self.key = Vec::new();
         self.iv = Vec::new();
+    }
+
+    pub fn hmac(&self, data: &[u8]) -> Option<Vec<u8>> {
+        todo!()
+    }
+
+    pub fn iv(&self) -> &[u8] {
+        self.iv.as_slice()
+    }
+
+    pub fn key(&self) -> &[u8] {
+        self.key.as_slice()
+    }
+
+    pub fn seq_num(&self) -> u64 {
+        self.seq_num
+    }
+
+    pub fn next_seq_num(&mut self) {
+        self.seq_num += 1;
+    }
+
+    pub fn reset_seq_num(&mut self) {
+        self.seq_num = 0;
     }
 }

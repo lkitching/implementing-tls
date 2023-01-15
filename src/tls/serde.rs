@@ -60,6 +60,12 @@ pub fn read_slice(buf: &[u8], length: usize) -> Result<(&[u8], &[u8]), BinaryRea
     }
 }
 
+pub fn write_slice<'a, 'b>(slice: &'a [u8], buf: &'b mut [u8]) -> &'b mut [u8] {
+    let (to_write, rest) = buf.split_at_mut(slice.len());
+    to_write.copy_from_slice(slice);
+    rest
+}
+
 pub fn read_elements<L, T>(buf: &[u8]) -> Result<(Vec<T>, &[u8]), BinaryReadError>
     where L: Into<usize> + BinaryReadable + FixedBinaryLength,
           T: BinaryReadable + FixedBinaryLength
@@ -165,5 +171,23 @@ impl BinaryReadable for u16 {
         let bytes: [u8; 2] = buf.try_into().map_err(|_| BinaryReadError::BufferTooSmall)?;
         let value = u16::from_be_bytes(bytes);
         Ok((value, &buf[2..]))
+    }
+}
+
+impl FixedBinaryLength for u64 {
+    fn fixed_binary_len() -> usize { 8 }
+}
+
+impl BinarySerialisable for u64 {
+    fn write_to(&self, buf: &mut [u8]) {
+        todo!()
+    }
+}
+
+impl BinaryReadable for u64 {
+    fn read_from(buf: &[u8]) -> Result<(Self, &[u8]), BinaryReadError> where Self: Sized {
+        let bytes: [u8; 8] = buf.try_into().map_err(|_| BinaryReadError::BufferTooSmall)?;
+        let value = u64::from_be_bytes(bytes);
+        Ok((value, &buf[8..]))
     }
 }

@@ -6,12 +6,14 @@ use super::serde::*;
 use super::messages::*;
 use super::secure::{self, ProtectionParameters};
 
-use crate::hash::{Digest};
+use crate::hash::{Digest, HashAlgorithm};
 use crate::md5::{MD5HashAlgorithm};
 use crate::sha::{SHA1HashAlgorithm};
 use crate::x509::{PublicKeyInfo};
 use crate::dh::{DHKey};
 use crate::prf::{prf, prf_bytes};
+use crate::tls::secure::get_cipher_suite;
+use crate::hmac;
 
 const TLS_VERSION: ProtocolVersion = ProtocolVersion { major: 3, minor: 1 };
 
@@ -308,7 +310,7 @@ fn send_change_cipher_spec<W: Write>(conn: &mut W, parameters: &mut TLSParameter
     let msg = TLSPlaintext { version: TLS_VERSION.clone(), message: ChangeCipherSpec { } };
     send_message(conn, &msg).map_err(TLSError::IOError)?;
 
-    parameters.pending_send_parameters.seq_num = 0;
+    parameters.pending_send_parameters.reset_seq_num();
     parameters.make_active();
 
     Ok(())
@@ -468,4 +470,115 @@ fn tls_connect(conn: &mut TcpStream, tls_params: &mut TLSParameters) -> Result<(
     }
 
     Ok(())
+}
+
+// TODO: merge with send_message
+// Create MessageSink with/without protection parameters?
+fn send_encrypted_message<W: Write>(dest: &mut W, application_data: &[u8], options: SendOptions, parameters: &mut ProtectionParameters) -> Result<(), TLSError> {
+    let active_suite = get_cipher_suite(parameters.suite);
+    let mac = if active_suite.has_digest() {
+        // allocate space for the sequence number, TLS header and content
+        // TODO: create message for this?
+        let buf_len = u64::fixed_binary_len() + TLSHeader::fixed_binary_len() + application_data.len();
+
+        let header = TLSHeader {
+            message_type: ContentType::ApplicationData,
+            version: TLS_VERSION,
+            length: application_data.len() as u16
+        };
+
+        // write sequence number
+        let mac_buf = {
+            let mut data_buf = vec![0u8; buf_len];
+            let mut buf = data_buf.as_mut_slice();
+
+            buf = write_front(&parameters.seq_num(), buf);
+
+            // write TLS header
+            buf = write_front(&header, buf);
+
+            // write content
+            buf.copy_from_slice(application_data);
+
+            data_buf
+        };
+
+        // TODO: make method on ProtectionParameters?
+        Some(parameters.hmac(mac_buf.as_slice()).unwrap())
+    } else {
+        None
+    };
+
+    // calculate the amount of padding required (if any)
+    let padding_len = if active_suite.block_size > 0 {
+        let data_len = application_data.len() + active_suite.hash_size;
+        active_suite.block_size - (data_len % active_suite.block_size)
+    } else {
+        0
+    };
+
+    let send_buffer_len = application_data.len() + active_suite.hash_size + padding_len;
+
+    // TODO: create message type?
+    let message_buf = {
+        let message_buf_len = TLSHeader::fixed_binary_len() + send_buffer_len;
+        let mut message_buf = vec![0u8; message_buf_len];
+
+        let header = TLSHeader {
+            message_type: ContentType::ApplicationData,
+            version: TLS_VERSION,
+            length: send_buffer_len as u16
+        };
+
+        // write header
+        let mut msg_buf = message_buf.as_mut_slice();
+        msg_buf = write_front(&header, msg_buf);
+
+        // write content
+        msg_buf = write_slice(application_data, msg_buf);
+
+        // write padding
+        for i in 0..padding_len {
+            msg_buf[i] = (padding_len - 1) as u8;
+        }
+
+        msg_buf = &mut msg_buf[0..padding_len];
+
+        // write MAC (if any)
+        if let Some(mac_bytes) = mac {
+            write_slice(mac_bytes.as_slice(), msg_buf);
+        }
+
+        message_buf
+    };
+
+    let send_buf = if active_suite.has_encryption() {
+        let mut encrypted_buf = vec![0; message_buf.len()];
+
+        // header is not encrypted
+        let (header, data) = message_buf.split_at(TLSHeader::fixed_binary_len());
+        let (enc_header, enc_data) = encrypted_buf.split_at_mut(TLSHeader::fixed_binary_len());
+
+        enc_header.copy_from_slice(header);
+
+        // encrypt data into rest of buffer
+        // TODO: check data length is multiple of block size?!
+        active_suite.bulk_encrypt(data, parameters.iv(), parameters.key(), enc_data);
+
+        encrypted_buf
+    } else {
+        message_buf
+    };
+
+    dest.write_all(send_buf.as_slice()).map_err(TLSError::IOError)?;
+
+    parameters.next_seq_num();
+
+    Ok(())
+}
+
+enum SendOptions {}
+
+fn tls_send<W: Write>(dest: &mut W, application_data: &[u8], options: SendOptions, parameters: &mut TLSParameters) -> Result<(), TLSError> {
+    send_encrypted_message(dest, application_data, options, &mut parameters.active_send_parameters)
 }
