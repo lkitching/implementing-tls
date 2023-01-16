@@ -18,7 +18,15 @@ impl CipherSuite {
         todo!()
     }
 
+    pub fn requires_padding(&self) -> bool {
+        self.block_size > 0
+    }
+
     pub fn bulk_encrypt(&self, plaintext: &[u8], iv: &[u8], key: &[u8], ciphertext_buf: &mut [u8]) {
+        todo!()
+    }
+
+    pub fn bulk_decrypt(&self, ciphertext: &[u8], iv: &[u8], key: &[u8], plaintext_buf: &mut [u8]) {
         todo!()
     }
 }

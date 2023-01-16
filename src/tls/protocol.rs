@@ -245,16 +245,7 @@ fn send_message<W: Write, T: BinarySerialisable>(dest: &mut W, msg: &T) -> io::R
 
 fn read_exact<R: Read>(source: &mut R, bytes: usize) -> io::Result<Vec<u8>> {
     let mut dest = vec![0; bytes];
-    let mut offset = 0;
-
-    while offset < bytes {
-        let bytes_read = source.read(&mut dest[offset..])?;
-        if bytes_read == 0 {
-            // EOF
-            return Err(io::Error::new(ErrorKind::UnexpectedEof, "Failed to read requested number of bytes: EOF"));
-        }
-        offset += bytes_read
-    }
+    source.read_exact(dest.as_mut_slice())?;
     Ok(dest)
 }
 
@@ -271,7 +262,8 @@ enum TLSError {
     IOError(io::Error),
     ParseError(BinaryReadError),
     UnknownMessage,
-    ProtocolError(String)
+    ProtocolError(String),
+    MalformedMessage(String)
 }
 
 enum ServerHandshakeMessage {
@@ -330,10 +322,106 @@ fn send_finished<W: Write>(conn: &mut W, parameters: &mut TLSParameters) -> Resu
 enum ServerMessage {
     Alert(Alert),
     Handshakes(Vec<ServerHandshakeMessage>),
-    ChangeCipherSpec
+    ChangeCipherSpec,
+    ApplicationData(Vec<u8>)
+}
+
+pub struct UserDataMACMessage<'a> {
+    header: TLSHeader,
+    data: &'a [u8],
+    sequence_number: u64
+}
+
+impl <'a> UserDataMACMessage<'a> {
+    pub fn new(data: &'a [u8], sequence_number: u64) -> Self {
+        Self {
+            header: TLSHeader {
+                message_type: ContentType::ApplicationData,
+                version: TLS_VERSION,
+                length: data.len() as u16
+            },
+            data,
+            sequence_number
+        }
+    }
+
+    pub fn calculate_mac(&self, parameters: &ProtectionParameters) -> Vec<u8> {
+        let buf = self.write_to_vec();
+        parameters.hmac(buf.as_slice()).unwrap()
+    }
+}
+
+impl <'a> BinaryLength for UserDataMACMessage<'a> {
+    fn binary_len(&self) -> usize {
+        // sequence number + TLSHeader + data
+        u64::fixed_binary_len() + TLSHeader::fixed_binary_len() + self.data.len()
+    }
+}
+
+impl <'a> BinarySerialisable for UserDataMACMessage<'a> {
+    fn write_to(&self, buf: &mut [u8]) {
+        // write sequence number
+        let buf = write_front(&self.sequence_number, buf);
+
+        // write TLS header
+        let buf = write_front(&self.header, buf);
+
+        // write data
+        write_slice(self.data, buf);
+    }
+}
+
+fn tls_decrypt(raw_msg: Vec<u8>, recv_parameters: &mut ProtectionParameters) -> Result<Vec<u8>, TLSError> {
+    let active_suite = get_cipher_suite(recv_parameters.suite);
+
+    let decrypted = if active_suite.has_encryption() {
+        let mut plaintext = vec![0u8; raw_msg.len()];
+        active_suite.bulk_decrypt(raw_msg.as_slice(), recv_parameters.iv(), recv_parameters.key(), plaintext.as_mut_slice());
+
+        // remove padding
+        // TODO: move to decryptor?
+        if active_suite.requires_padding() {
+            let padding_len = plaintext.last().ok_or(TLSError::MalformedMessage("Empty plaintext when padding required by active cipher suite".to_owned()))?;
+            if (*padding_len as usize) > plaintext.len() {
+                return Err(TLSError::MalformedMessage("Invalid padding length".to_owned()));
+            } else {
+                let plaintext_length = plaintext.len() - (*padding_len as usize);
+                plaintext.truncate(plaintext_length);
+                plaintext
+            }
+        } else {
+            plaintext
+        }
+    } else {
+        raw_msg
+    };
+
+    // verify the MAC if the cipher suite defines one
+    if active_suite.has_digest() {
+        let data_len = if active_suite.hash_size > decrypted.len() {
+            return Err(TLSError::MalformedMessage("Invalid MAC".to_owned()));
+        } else {
+            (decrypted.len() - active_suite.hash_size) as usize
+        };
+
+        let (data, sent_mac) = decrypted.split_at(data_len);
+        let mac_msg = UserDataMACMessage::new(data, recv_parameters.seq_num());
+        let calculated_mac = mac_msg.calculate_mac(&recv_parameters);
+
+        if sent_mac != calculated_mac {
+            return Err(TLSError::MalformedMessage("Invalid MAC".to_owned()))
+        }
+
+        Ok(data.to_vec())
+    } else {
+        Ok(decrypted)
+    }
 }
 
 fn parse_server_message(header: &TLSHeader, buf: Vec<u8>, parameters: &mut TLSParameters) -> Result<ServerMessage, TLSError> {
+    // decrypt incoming message if required
+    let buf = tls_decrypt(buf, &mut parameters.active_send_parameters)?;
+
     match header.message_type {
         ContentType::Handshake => {
             // TODO: check this is valid!
@@ -353,9 +441,9 @@ fn parse_server_message(header: &TLSHeader, buf: Vec<u8>, parameters: &mut TLSPa
             ChangeCipherSpec::read_all_from(buf.as_slice())
                 .map(|_| ServerMessage::ChangeCipherSpec)
                 .map_err(TLSError::ParseError)
-        }
-        _ => {
-            Err(TLSError::UnknownMessage)
+        },
+        ContentType::ApplicationData => {
+            Ok(ServerMessage::ApplicationData(buf))
         }
     }
 }
@@ -430,6 +518,9 @@ fn tls_connect(conn: &mut TcpStream, tls_params: &mut TLSParameters) -> Result<(
             }
             ServerMessage::Alert(alert) => {
                 alert.report()
+            },
+            ServerMessage::ApplicationData(data) => {
+                return Err(TLSError::ProtocolError("Unexpected 'application data' message while waiting for server handshake".to_owned()))
             }
         };
     }
@@ -481,34 +572,21 @@ fn tls_connect(conn: &mut TcpStream, tls_params: &mut TLSParameters) -> Result<(
 fn send_encrypted_message<W: Write>(dest: &mut W, application_data: &[u8], options: SendOptions, parameters: &mut ProtectionParameters) -> Result<(), TLSError> {
     let active_suite = get_cipher_suite(parameters.suite);
     let mac = if active_suite.has_digest() {
-        // allocate space for the sequence number, TLS header and content
-        // TODO: create message for this?
-        let buf_len = u64::fixed_binary_len() + TLSHeader::fixed_binary_len() + application_data.len();
 
+        // create message for outgoing MAC calculation
         let header = TLSHeader {
             message_type: ContentType::ApplicationData,
             version: TLS_VERSION,
             length: application_data.len() as u16
         };
 
-        // write sequence number
-        let mac_buf = {
-            let mut data_buf = vec![0u8; buf_len];
-            let mut buf = data_buf.as_mut_slice();
-
-            buf = write_front(&parameters.seq_num(), buf);
-
-            // write TLS header
-            buf = write_front(&header, buf);
-
-            // write content
-            buf.copy_from_slice(application_data);
-
-            data_buf
-        };
-
         // TODO: make method on ProtectionParameters?
-        Some(parameters.hmac(mac_buf.as_slice()).unwrap())
+        let msg = UserDataMACMessage {
+            data: application_data,
+            header,
+            sequence_number: parameters.seq_num()
+        };
+        Some(msg.calculate_mac(&parameters))
     } else {
         None
     };
