@@ -45,6 +45,13 @@ impl TLSParameters {
         todo!()
     }
 
+    fn free_protection_parameters(&mut self) {
+        self.active_send_parameters.free();
+        self.pending_send_parameters.free();
+        self.active_recv_parameters.free();
+        self.pending_recv_parameters.free();
+    }
+
     fn make_active(&mut self) {
         self.active_send_parameters = self.pending_send_parameters.clone();
         self.pending_send_parameters.init();
@@ -663,4 +670,8 @@ enum SendOptions {}
 
 fn tls_send<W: Write>(dest: &mut W, application_data: &[u8], options: SendOptions, parameters: &mut TLSParameters) -> Result<(), TLSError> {
     send_encrypted_message(dest, application_data, options, &mut parameters.active_send_parameters)
+}
+
+fn tls_shutdown<W: Write>(dest: &mut W, parameters: &mut TLSParameters) -> Result<(), TLSError> {
+    send_alert_message(dest, AlertDescription::CloseNotify).map_err(TLSError::IOError)
 }

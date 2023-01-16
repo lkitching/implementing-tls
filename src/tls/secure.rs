@@ -119,11 +119,17 @@ impl ProtectionParameters {
     }
 
     pub fn init(&mut self) {
+        // TODO: should be able to remove
         self.suite = CipherSuiteIdentifier::TLS_NULL_WITH_NULL_NULL;
         self.seq_num = 0;
         self.mac_secret = Vec::new();
         self.key = Vec::new();
         self.iv = Vec::new();
+    }
+
+    pub fn free(&mut self) {
+        // TODO: should be able to remove
+        self.init()
     }
 
     pub fn hmac(&self, data: &[u8]) -> Option<Vec<u8>> {
